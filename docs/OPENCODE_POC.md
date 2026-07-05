@@ -171,6 +171,13 @@ python integrations/opencode/adapter/session_state_adapter.py --format markdown
 python integrations/opencode/adapter/session_state_adapter.py --resume
 ```
 
+On macOS, use `python3`:
+
+```sh
+python3 integrations/opencode/adapter/session_state_adapter.py --format markdown
+python3 integrations/opencode/adapter/session_state_adapter.py --resume
+```
+
 To expose commands to OpenCode, copy or symlink:
 
 ```text
@@ -190,13 +197,126 @@ Then in OpenCode:
 /companion-handoff
 ```
 
-## Input Selection
+## macOS OpenCode TUI Verification
 
-The adapter defaults to:
+Verified on a MacBook OpenCode TUI from:
 
 ```text
-outputs/representations_full_124_gemini_3_1_flash_lite
+/Users/hyuk/project/ai-worker-companion
 ```
+
+The test project root used a symlink:
+
+```text
+.opencode -> integrations/opencode/.opencode
+```
+
+The public clone did not include the default generated representation folder. The adapter now falls back to the sanitized public example when no generated output folder is present:
+
+```sh
+opencode .
+```
+
+The same input can be selected explicitly:
+
+```sh
+SESSION_STATE_INPUT="$PWD/examples/session.state.example.json" opencode .
+```
+
+Observed in the OpenCode command palette:
+
+```text
+/companion-state
+/companion-handoff
+```
+
+Observed `/companion-state` result:
+
+```text
+Status: healthy
+Blocker: none_observed
+Next Action: Continue from the current goal without restarting from scratch.
+```
+
+Observed `/companion-handoff` result:
+
+```text
+You are continuing an AI agent session.
+
+Current Goal:
+Review the current agent state and prepare a safe handoff if the work needs to continue elsewhere.
+
+Instructions:
+Continue from this state. Do not restart from scratch. Use the current goal and blocker as the immediate context.
+```
+
+The verification confirmed that OpenCode can call the Companion PoC from the MacBook TUI without changing the Core Engine, Extractor, schema, `session_state.py`, Companion UX, or recovery behavior.
+
+## macOS Command Notes
+
+The command files use `python3` because the tested macOS shell did not provide a `python` executable. Without this, OpenCode command execution can fail with:
+
+```text
+zsh:1: command not found: python
+```
+
+The command files also include:
+
+```text
+Do not run additional shell commands.
+```
+
+This keeps the OpenCode agent from treating the injected Companion output as a request to run another command. The intended slash command behavior is:
+
+```text
+OpenCode command
+  -> inject adapter output
+  -> show or summarize the injected output
+  -> stop
+```
+
+This preserves the PoC boundary: no automatic recovery, no extra extraction, and no unrequested session restart.
+
+## From Slash Command to Always-On Companion
+
+The `/companion-state` command is a successful technical PoC:
+
+```text
+OpenCode TUI
+  -> project slash command
+  -> adapter
+  -> session_state.py
+  -> Companion state output
+```
+
+However, the UX is still not the final product experience. Requiring the user to type `/companion-state` every time is useful for validation, but it is too manual for an always-on Companion.
+
+The next PoC target is an OpenCode plugin/event-based Companion that can react to state changes, tool events, session events, or TUI events without requiring repeated manual slash command invocation.
+
+Before implementing that, verify:
+
+1. Whether the OpenCode plugin lifecycle supports a startup hook.
+2. Whether the plugin can receive session, tool, and TUI events reliably.
+3. Whether the plugin can show toast or desktop notifications.
+4. Whether OpenCode exposes a persistent UI surface for status display.
+5. If no persistent surface exists, whether event-driven notification alone is enough for the MVP.
+
+This next step should still preserve the current recovery boundary:
+
+- no automatic recovery
+- no automatic new session
+- no new hosted LLM API
+- no Extractor or schema changes
+- no Companion UX rewrite
+
+## Input Selection
+
+The adapter chooses input in this order:
+
+1. Explicit `--input` argument.
+2. `SESSION_STATE_INPUT` environment variable.
+3. Default generated output folder: `outputs/representations_full_124_gemini_3_1_flash_lite`.
+4. Public fallback example: `examples/session.state.example.json`.
 
 Override with:
 
@@ -208,6 +328,21 @@ or:
 
 ```powershell
 python integrations/opencode/adapter/session_state_adapter.py --input path/to/representations --format markdown
+```
+
+For a public clone without generated outputs, use:
+
+```sh
+python3 integrations/opencode/adapter/session_state_adapter.py --format markdown
+
+python3 integrations/opencode/adapter/session_state_adapter.py --resume
+```
+
+or select the example explicitly:
+
+```sh
+export SESSION_STATE_INPUT="$PWD/examples/session.state.example.json"
+python3 integrations/opencode/adapter/session_state_adapter.py --format markdown
 ```
 
 ## Architecture Boundary

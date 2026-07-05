@@ -15,6 +15,7 @@ from pathlib import Path
 
 
 DEFAULT_INPUT = "outputs/representations_full_124_gemini_3_1_flash_lite"
+EXAMPLE_INPUT = "examples/session.state.example.json"
 
 
 def repo_root() -> Path:
@@ -26,6 +27,48 @@ def resolve_input(value: str, root: Path) -> Path:
     if path.is_absolute():
         return path
     return root / path
+
+
+def input_candidates(root: Path) -> list[tuple[str, Path]]:
+    return [
+        ("default outputs", resolve_input(DEFAULT_INPUT, root)),
+        ("public example", resolve_input(EXAMPLE_INPUT, root)),
+    ]
+
+
+def select_input(args: argparse.Namespace, root: Path) -> tuple[Path | None, list[tuple[str, Path]]]:
+    if args.input:
+        path = resolve_input(args.input, root)
+        return (path if path.exists() else None), [("--input", path)]
+
+    env_value = os.environ.get("SESSION_STATE_INPUT")
+    if env_value:
+        path = resolve_input(env_value, root)
+        return (path if path.exists() else None), [("SESSION_STATE_INPUT", path)]
+
+    candidates = input_candidates(root)
+    for _, path in candidates:
+        if path.exists():
+            return path, candidates
+    return None, candidates
+
+
+def print_missing_input(candidates: list[tuple[str, Path]], root: Path) -> None:
+    print("No representation input found.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("Checked candidate paths:", file=sys.stderr)
+    for label, path in candidates:
+        status = "found" if path.exists() else "missing"
+        print(f"- {label}: {path} ({status})", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("How to fix:", file=sys.stderr)
+    print("- Generate or restore a representation output folder.", file=sys.stderr)
+    print("- Or point SESSION_STATE_INPUT at a representation JSON file/folder.", file=sys.stderr)
+    print("- Public clone example:", file=sys.stderr)
+    print(
+        f'  export SESSION_STATE_INPUT="{root / EXAMPLE_INPUT}"',
+        file=sys.stderr,
+    )
 
 
 def build_command(args: argparse.Namespace, root: Path, input_path: Path) -> list[str]:
@@ -57,8 +100,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--input",
-        default=os.environ.get("SESSION_STATE_INPUT", DEFAULT_INPUT),
-        help="Representation JSON file or folder. Defaults to SESSION_STATE_INPUT or the Phase 0.5 output folder.",
+        help="Representation JSON file or folder. Overrides SESSION_STATE_INPUT and the adapter fallback paths.",
     )
     parser.add_argument(
         "--format",
@@ -94,18 +136,13 @@ def main() -> int:
     args = parse_args()
     root = repo_root()
     session_state = root / "session_state.py"
-    input_path = resolve_input(args.input, root)
+    input_path, candidates = select_input(args, root)
 
     if not session_state.exists():
         print(f"session_state.py not found: {session_state}", file=sys.stderr)
         return 2
-    if not input_path.exists():
-        print(
-            "No representation input found.\n"
-            f"Expected: {input_path}\n"
-            "Set SESSION_STATE_INPUT or pass --input to point at a representation JSON file/folder.",
-            file=sys.stderr,
-        )
+    if input_path is None:
+        print_missing_input(candidates, root)
         return 2
 
     command = build_command(args, root, input_path)
