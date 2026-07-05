@@ -1,0 +1,8 @@
+{"timestamp":"2026-06-20T00:00:00Z","type":"session_meta","payload":{"id":"sample-session"}}
+{"timestamp":"2026-06-20T00:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"빌드 에러를 고쳐줘."}]}}
+{"timestamp":"2026-06-20T00:00:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"먼저 빌드를 재현하겠습니다."}]}}
+{"timestamp":"2026-06-20T00:00:03Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"npm run build\"}","call_id":"call-1"}}
+{"timestamp":"2026-06-20T00:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-1","output":"TS2307: Cannot find module './config'"}}
+{"timestamp":"2026-06-20T00:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"config import 경로와 실제 파일 위치를 확인하겠습니다."}]}}
+{"timestamp":"2026-06-20T00:00:06Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg \\\"./config\\\" src\"}","call_id":"call-2"}}
+

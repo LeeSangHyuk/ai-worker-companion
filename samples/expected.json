@@ -1,0 +1,50 @@
+{
+  "goal": {
+    "primary_goal": {
+      "value": "빌드 오류를 수정한다.",
+      "evidence_ids": ["e001"]
+    },
+    "active_goal": {
+      "value": "config 모듈 import 오류의 원인을 찾는다.",
+      "evidence_ids": ["e004", "e005"]
+    },
+    "previous_goals": [],
+    "goal_shift_detected": false,
+    "goal_shift_evidence": []
+  },
+  "current_situation": {
+    "summary": "빌드가 config 모듈 import 오류로 실패했고, import 경로와 실제 파일 위치를 조사하고 있다. 오류 수정과 빌드 재검증이 남아 있다.",
+    "evidence_ids": ["e004", "e005", "e006"]
+  },
+  "blocker": {
+    "status": "none_observed",
+    "value": null,
+    "evidence_ids": ["e005", "e006"]
+  },
+  "evidence": [
+    {
+      "id": "e001",
+      "type": "user_message",
+      "content": "빌드 에러를 고쳐줘.",
+      "source_line": 2
+    },
+    {
+      "id": "e004",
+      "type": "tool_result",
+      "content": "TS2307: Cannot find module './config'",
+      "source_line": 5
+    },
+    {
+      "id": "e005",
+      "type": "assistant_message",
+      "content": "config import 경로와 실제 파일 위치를 확인하겠습니다.",
+      "source_line": 6
+    },
+    {
+      "id": "e006",
+      "type": "tool_call",
+      "content": "exec_command: {\"cmd\":\"rg \\\"./config\\\" src\"}",
+      "source_line": 7
+    }
+  ]
+}

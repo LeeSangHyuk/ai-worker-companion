@@ -1,0 +1,74 @@
+# Python caches and test artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Node / frontend caches
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local agent/runtime state
+.agents/
+.agent-handoff/
+.codex/
+
+# Secrets and local environment files
+.env
+.env.*
+*.key
+*.pem
+
+# Private raw exports and local validation data
+raw_data/
+
+# Generated representation and validation artifacts
+outputs/
+reports/
+reviews/
+viewer/
+evaluation_output.txt
+evaluation_goal_stack.txt
+evaluation_*.txt
+*.actual.json
+
+# Generated static pages and local reports
+*.generated.html
+*.tmp
+*.temp
+*.log
+
+# Keep source examples and tests in version control.
+!samples/
+!samples/**
+!tests/
+!tests/**
+
+# Force-ignore caches even under explicitly kept example/test folders.
+**/__pycache__/
+**/*.py[cod]
+
+# Historical generated HTML artifact.
+docs/roadmap.html
