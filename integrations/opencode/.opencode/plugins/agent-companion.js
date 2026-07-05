@@ -73,13 +73,6 @@ function oneLine(value, max = 96) {
   return `${line.slice(0, max - 3)}...`;
 }
 
-function compactTime(value) {
-  if (!value || value === "unavailable") return value;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
 function textNode(solid, props, value) {
   const node = solid.createElement("text");
   for (const [name, propValue] of Object.entries(props)) {
@@ -98,22 +91,6 @@ function boxNode(solid, props, children) {
     solid.insert(node, child);
   }
   return node;
-}
-
-function renderPromptSurface(solid, theme, state) {
-  return textNode(
-    solid,
-    { fg: state.status === "Unknown" ? theme.warning : theme.textMuted },
-    `Companion: ${state.status} | ${oneLine(state.currentState, 48)}`,
-  );
-}
-
-function renderBottomSurface(solid, theme, state) {
-  return textNode(
-    solid,
-    { fg: state.status === "Unknown" ? theme.warning : theme.textMuted, wrapMode: "none" },
-    `Companion: ${state.status} | ${oneLine(state.currentState, 58)} | ${compactTime(state.lastUpdate)}`,
-  );
 }
 
 function renderSidebarSurface(solid, theme, state) {
@@ -189,8 +166,6 @@ export const tui = async (api, _options, meta) => {
 
   const state = readCompanionState(api.state?.path?.directory ?? process.cwd());
   const renderers = {
-    app_bottom: () => renderBottomSurface(solid, api.theme.current, state),
-    session_prompt_right: () => renderPromptSurface(solid, api.theme.current, state),
     sidebar_content: () => renderSidebarSurface(solid, api.theme.current, state),
   };
 
