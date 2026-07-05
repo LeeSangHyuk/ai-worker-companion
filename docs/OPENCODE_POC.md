@@ -309,6 +309,88 @@ This next step should still preserve the current recovery boundary:
 - no Extractor or schema changes
 - no Companion UX rewrite
 
+## Persistent TUI Companion PoC
+
+Verified on the same MacBook OpenCode TUI from:
+
+```text
+/Users/hyuk/project/ai-worker-companion
+```
+
+The test project root used:
+
+```text
+.opencode -> integrations/opencode/.opencode
+```
+
+The TUI plugin is registered by project-local config:
+
+```text
+integrations/opencode/.opencode/tui.json
+```
+
+which loads:
+
+```text
+integrations/opencode/.opencode/tui-plugins/agent-companion.js
+```
+
+That wrapper imports the `tui` export from:
+
+```text
+integrations/opencode/.opencode/plugins/agent-companion.js
+```
+
+The wrapper is required because OpenCode expects a plugin module default export to be either a server plugin or a TUI plugin. Keeping the server plugin and TUI plugin as separate entrypoints avoids default-export ambiguity while preserving the existing slash command fallback path.
+
+Observed result:
+
+```text
+Companion: Working | The agent has completed the initial inspection and iden...
+```
+
+Surface findings:
+
+1. `app_bottom`: confirmed. It displayed a compact persistent Companion line without the user typing `/companion-state`.
+2. `session_prompt_right`: registered, but not visually confirmed in the final home-screen verification.
+3. `sidebar_content`: registered, but not visually confirmed in the final home-screen verification.
+4. `ui.toast`: useful only as a secondary warning. A success toast was distracting, so it was removed. The PoC keeps a warning toast only when the state is `Unknown` because representation input is unavailable or unreadable.
+5. `attention.notify`: not used in this PoC.
+
+The `app_bottom` line is currently the most realistic MVP surface because it is visible without an explicit slash command and does not require a separate session prompt or sidebar state to be open.
+
+The TUI status surface intentionally shows only:
+
+- `Status`: `Working`, `Needs Human`, `Stuck`, or `Unknown`
+- `Current State`: one compact line
+- `Last Update`: compact timestamp
+
+This PoC did not add automatic recovery, automatic new-session execution, hosted LLM API calls, Extractor changes, schema changes, or `session_state.py` changes.
+
+### TUI Dependency Metadata
+
+The persistent TUI surface uses OpenCode's TUI slot API and renders with `@opentui/solid`.
+
+The repository tracks:
+
+```text
+integrations/opencode/.opencode/package.json
+```
+
+to make the required dependencies explicit:
+
+```text
+@opencode-ai/plugin
+@opentui/solid
+```
+
+The repository does not track `node_modules/` or the generated `package-lock.json`. The current lockfile was generated from a local symlinked `.opencode` path and is not necessary for the PoC record. Reproduce the local dependency install from:
+
+```sh
+cd integrations/opencode/.opencode
+npm install
+```
+
 ## Input Selection
 
 The adapter chooses input in this order:
