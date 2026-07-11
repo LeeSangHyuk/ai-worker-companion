@@ -9,60 +9,186 @@
 // The working MVP path is the slash command in .opencode/commands.
 // This plugin exists to validate future status/notification hooks.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
-const EXAMPLE_INPUT = "examples/session.state.example.json";
+const SIDEBAR_MIN_WIDTH = 100;
+const HEALTH_REFRESH_THROTTLE_MS = 1500;
+const DEBUG_LAYOUT = process.env.COMPANION_DEBUG_LAYOUT === "1";
+const DEFAULT_OPENCODE_DB = join(homedir(), ".local/share/opencode/opencode.db");
+const HEALTH_REFRESH_EVENTS = new Set([
+  "command.executed",
+  "message.part.delta",
+  "message.part.updated",
+  "message.updated",
+  "session.created",
+  "session.diff",
+  "session.error",
+  "session.idle",
+  "session.status",
+  "session.updated",
+  "session.next.shell.started",
+  "session.next.shell.ended",
+  "session.next.step.started",
+  "session.next.step.ended",
+  "session.next.step.failed",
+  "session.next.tool.called",
+  "session.next.tool.progress",
+  "session.next.tool.success",
+  "session.next.tool.failed",
+]);
 
 function repoRootFromDirectory(directory) {
   return resolve(directory ?? process.cwd());
 }
 
-function readCompanionState(directory) {
-  const root = repoRootFromDirectory(directory);
-  const inputPath = process.env.SESSION_STATE_INPUT
-    ? resolve(root, process.env.SESSION_STATE_INPUT)
-    : join(root, EXAMPLE_INPUT);
+function labelForHealth(health) {
+  switch (health) {
+    case "active":
+      return "Active";
+    case "quiet":
+      return "Quiet";
+    case "stuck":
+      return "Stuck";
+    case "failed":
+      return "Failed";
+    case "idle":
+      return "Idle";
+    case "unknown":
+      return "Unknown";
+    default:
+      return "Unknown";
+  }
+}
 
-  if (!existsSync(inputPath)) {
+function compactToolSummary(result) {
+  const command = result?.tool?.command;
+  const elapsed = result?.tool?.elapsed_seconds;
+  if (!command) return null;
+  if (typeof elapsed === "number") return `${command} · ${elapsed}s`;
+  return command;
+}
+
+function statusColor(theme, status) {
+  switch (status) {
+    case "Active":
+      return theme.success ?? theme.info;
+    case "Quiet":
+      return theme.warning ?? theme.info;
+    case "Stuck":
+    case "Failed":
+      return theme.error ?? theme.warning;
+    case "Unknown":
+      return theme.warning ?? theme.textMuted;
+    case "Idle":
+    default:
+      return theme.textMuted;
+  }
+}
+
+function formatToolDetail(state) {
+  const parts = [];
+  if (state.toolName) parts.push(state.toolName);
+  if (state.toolStatus) parts.push(state.toolStatus);
+  if (state.toolCommand) parts.push(state.toolCommand);
+  if (typeof state.toolElapsedSeconds === "number") parts.push(`${state.toolElapsedSeconds}s`);
+  if (typeof state.toolExit === "number") parts.push(`exit ${state.toolExit}`);
+  return parts.length > 0 ? parts.join(" · ") : "none";
+}
+
+function formatCheckedAt(value) {
+  if (typeof value !== "number") return "unavailable";
+  return new Date(value * 1000).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function parseWatcherOutput(raw) {
+  if (!raw) return null;
+  try {
+    return JSON.parse(String(raw));
+  } catch {
+    return null;
+  }
+}
+
+function readHealthState(directory) {
+  const root = repoRootFromDirectory(directory);
+  const watcherPath = join(root, "integrations/opencode/adapter/db_health_watcher.py");
+  const dbPath = process.env.OPENCODE_DB ?? DEFAULT_OPENCODE_DB;
+
+  if (!existsSync(watcherPath)) {
     return {
+      health: "unknown",
       status: "Unknown",
-      currentState: `No representation input found at ${inputPath}`,
+      reason: `db_health_watcher.py not found at ${watcherPath}`,
+      currentState: `db_health_watcher.py not found at ${watcherPath}`,
       lastUpdate: "unavailable",
-      source: inputPath,
+      source: watcherPath,
+      toolName: null,
+      toolCommand: null,
+      toolStatus: null,
+      toolElapsedSeconds: null,
+      toolExit: null,
     };
   }
 
   try {
-    const raw = readFileSync(inputPath, "utf8");
-    const data = JSON.parse(raw);
-    const blockerStatus = data?.blocker?.status;
-    const status =
-      blockerStatus === "blocked"
-        ? "Stuck"
-        : blockerStatus === "needs_human"
-          ? "Needs Human"
-          : blockerStatus === "none_observed"
-            ? "Working"
-            : "Unknown";
-    const currentState =
-      data?.current_situation?.summary ??
-      data?.goal_stack?.active_goal?.value ??
-      "No current state summary in representation input.";
-    const lastUpdate = statSync(inputPath).mtime.toLocaleString();
+    let result;
+    try {
+      const stdout = execFileSync("python3", [
+        watcherPath,
+        "--db",
+        dbPath,
+        "--session",
+        "latest",
+        "--once",
+      ], {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 3000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      result = JSON.parse(stdout);
+    } catch (error) {
+      result = parseWatcherOutput(error?.stdout);
+      if (!result) throw error;
+    }
+    const toolSummary = compactToolSummary(result);
+    const reason = result?.reason ?? "No health reason returned by watcher.";
+    const health = result?.health ?? "unknown";
+    const tool = result?.tool ?? {};
 
     return {
-      status,
-      currentState,
-      lastUpdate,
-      source: inputPath,
+      health,
+      status: labelForHealth(health),
+      reason,
+      currentState: toolSummary ? `${reason} (${toolSummary})` : reason,
+      lastUpdate: formatCheckedAt(result?.checked_at),
+      source: result?.source ?? dbPath,
+      toolName: tool?.name ?? null,
+      toolCommand: tool?.command ?? null,
+      toolStatus: tool?.status ?? null,
+      toolElapsedSeconds: tool?.elapsed_seconds ?? null,
+      toolExit: tool?.exit ?? null,
     };
   } catch (error) {
+    const reason = `Failed to read db_health_watcher.py output: ${error instanceof Error ? error.message : String(error)}`;
     return {
+      health: "unknown",
       status: "Unknown",
-      currentState: `Failed to read representation input: ${error instanceof Error ? error.message : String(error)}`,
+      reason,
+      currentState: reason,
       lastUpdate: "unavailable",
-      source: inputPath,
+      source: watcherPath,
+      toolName: null,
+      toolCommand: null,
+      toolStatus: null,
+      toolElapsedSeconds: null,
+      toolExit: null,
     };
   }
 }
@@ -71,6 +197,21 @@ function oneLine(value, max = 96) {
   const line = String(value ?? "").replace(/\s+/g, " ").trim();
   if (line.length <= max) return line;
   return `${line.slice(0, max - 3)}...`;
+}
+
+function isCompactLayout(api) {
+  const width = api?.renderer?.width ?? process.stdout.columns ?? 80;
+  return width < SIDEBAR_MIN_WIDTH;
+}
+
+function layoutDebug(api) {
+  const width = api?.renderer?.width ?? process.stdout.columns ?? 80;
+  const mode = width < SIDEBAR_MIN_WIDTH ? "compact" : "wide";
+  return { width, mode };
+}
+
+function shouldRefreshHealth(eventType) {
+  return HEALTH_REFRESH_EVENTS.has(eventType);
 }
 
 function textNode(solid, props, value) {
@@ -93,7 +234,18 @@ function boxNode(solid, props, children) {
   return node;
 }
 
-function renderSidebarSurface(solid, theme, state) {
+function renderSidebarSurface(solid, theme, state, debug) {
+  const tone = statusColor(theme, state.status);
+  const children = [
+    textNode(solid, { fg: tone }, `Health: ${state.status}`),
+    textNode(solid, { fg: theme.textMuted }, `Reason: ${oneLine(state.reason ?? state.currentState, 72)}`),
+    textNode(solid, { fg: theme.textMuted }, `Tool: ${oneLine(formatToolDetail(state), 72)}`),
+    textNode(solid, { fg: theme.textMuted }, `Last Update: ${state.lastUpdate}`),
+  ];
+  if (debug) {
+    children.push(textNode(solid, { fg: theme.textMuted }, `debug: width=${debug.width} mode=${debug.mode}`));
+  }
+
   return boxNode(
     solid,
     {
@@ -102,11 +254,16 @@ function renderSidebarSurface(solid, theme, state) {
       flexDirection: "column",
       padding: 1,
     },
-    [
-      textNode(solid, { fg: state.status === "Unknown" ? theme.warning : theme.info }, `Companion: ${state.status}`),
-      textNode(solid, { fg: theme.textMuted }, `Current State: ${oneLine(state.currentState, 72)}`),
-      textNode(solid, { fg: theme.textMuted }, `Last Update: ${state.lastUpdate}`),
-    ],
+    children,
+  );
+}
+
+function renderCompactStatus(solid, theme, state, debug) {
+  const label = DEBUG_LAYOUT && debug ? `● ${state.status} · debug: width=${debug.width} mode=${debug.mode}` : `● ${state.status}`;
+  return textNode(
+    solid,
+    { fg: statusColor(theme, state.status), wrapMode: "none" },
+    label,
   );
 }
 
@@ -164,13 +321,36 @@ export const tui = async (api, _options, meta) => {
     return;
   }
 
-  const state = readCompanionState(api.state?.path?.directory ?? process.cwd());
+  const directory = api.state?.path?.directory ?? process.cwd();
+  let state = readHealthState(directory);
+  let lastHealthRefreshAt = Date.now();
+
+  function refreshHealth({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && now - lastHealthRefreshAt < HEALTH_REFRESH_THROTTLE_MS) return false;
+
+    state = readHealthState(directory);
+    lastHealthRefreshAt = now;
+    return true;
+  }
+
+  function renderCompactSurface() {
+    refreshHealth();
+    const debug = DEBUG_LAYOUT ? layoutDebug(api) : null;
+    return renderCompactStatus(solid, api.theme.current, state, debug);
+  }
+
   const renderers = {
-    sidebar_content: () => renderSidebarSurface(solid, api.theme.current, state),
+    session_prompt_right: renderCompactSurface,
+    sidebar_content: () => {
+      refreshHealth();
+      const debug = DEBUG_LAYOUT ? layoutDebug(api) : null;
+      return isCompactLayout(api) ? null : renderSidebarSurface(solid, api.theme.current, state, debug);
+    },
   };
 
   api.slots.register({
-    order: 950,
+    order: 10000,
     slots: renderers,
   });
   api.renderer?.requestRender?.();
@@ -183,4 +363,13 @@ export const tui = async (api, _options, meta) => {
       duration: 4000,
     });
   }
+
+  return {
+    event: async ({ event }) => {
+      if (!shouldRefreshHealth(event?.type)) return;
+      if (refreshHealth()) {
+        api.renderer?.requestRender?.();
+      }
+    },
+  };
 };
