@@ -117,15 +117,22 @@ function parseWatcherOutput(raw) {
 
 function readHealthState(directory) {
   const root = repoRootFromDirectory(directory);
-  const watcherPath = join(root, "integrations/opencode/adapter/db_health_watcher.py");
+  const runtimeDir = process.env.AWC_RUNTIME_DIR ?? join(homedir(), ".local/share/awc");
+  const installedWatcher = join(runtimeDir, "adapter/db_health_watcher.ts");
+  const repositoryTypeScriptWatcher = join(root, "integrations/opencode/adapter/db_health_watcher.ts");
+  const repositoryPythonWatcher = join(root, "integrations/opencode/adapter/db_health_watcher.py");
+  const watcherPath = process.env.AWC_HEALTH_WATCHER
+    ?? [installedWatcher, repositoryTypeScriptWatcher, repositoryPythonWatcher].find(existsSync)
+    ?? installedWatcher;
+  const watcherCommand = watcherPath.endsWith(".py") ? "python3" : (process.env.AWC_NODE ?? "node");
   const dbPath = process.env.OPENCODE_DB ?? DEFAULT_OPENCODE_DB;
 
   if (!existsSync(watcherPath)) {
     return {
       health: "unknown",
       status: "Unknown",
-      reason: `db_health_watcher.py not found at ${watcherPath}`,
-      currentState: `db_health_watcher.py not found at ${watcherPath}`,
+      reason: `Health watcher not found at ${watcherPath}`,
+      currentState: `Health watcher not found at ${watcherPath}`,
       lastUpdate: "unavailable",
       source: watcherPath,
       toolName: null,
@@ -139,7 +146,7 @@ function readHealthState(directory) {
   try {
     let result;
     try {
-      const stdout = execFileSync("python3", [
+      const stdout = execFileSync(watcherCommand, [
         watcherPath,
         "--db",
         dbPath,
@@ -176,7 +183,7 @@ function readHealthState(directory) {
       toolExit: tool?.exit ?? null,
     };
   } catch (error) {
-    const reason = `Failed to read db_health_watcher.py output: ${error instanceof Error ? error.message : String(error)}`;
+    const reason = `Failed to read Health watcher output: ${error instanceof Error ? error.message : String(error)}`;
     return {
       health: "unknown",
       status: "Unknown",

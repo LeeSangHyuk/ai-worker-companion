@@ -1,0 +1,22 @@
+{
+  "name": "ai-worker-companion",
+  "version": "0.2.0",
+  "description": "Health companion for OpenCode sessions",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "awc": "bin/awc.js"
+  },
+  "scripts": {
+    "test:npm-poc": "node --test npm/test/*.test.js"
+  },
+  "files": [
+    "bin/",
+    "npm/",
+    "integrations/opencode/adapter/db_health_watcher.ts",
+    "integrations/opencode/.opencode/plugins/agent-companion.js"
+  ],
+  "license": "MIT"
+}
