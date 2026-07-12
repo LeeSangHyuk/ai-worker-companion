@@ -2,6 +2,21 @@
   "name": "ai-worker-companion",
   "version": "0.2.0",
   "description": "Health companion for OpenCode sessions",
+  "keywords": [
+    "opencode",
+    "ai-agent",
+    "health-monitoring",
+    "developer-tools",
+    "tui"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeeSangHyuk/ai-worker-companion.git"
+  },
+  "homepage": "https://github.com/LeeSangHyuk/ai-worker-companion#readme",
+  "bugs": {
+    "url": "https://github.com/LeeSangHyuk/ai-worker-companion/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=24"
@@ -10,11 +25,12 @@
     "awc": "bin/awc.js"
   },
   "scripts": {
-    "test:npm-poc": "node --test npm/test/*.test.js"
+    "test": "node --test npm/test/*.test.js",
+    "test:npm-poc": "npm test"
   },
   "files": [
     "bin/",
-    "npm/",
+    "npm/cli/",
     "integrations/opencode/adapter/db_health_watcher.ts",
     "integrations/opencode/.opencode/plugins/agent-companion.js"
   ],

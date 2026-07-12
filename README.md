@@ -60,7 +60,34 @@ Core Engine
 
 ## Quick Start
 
-### 1. Install locally
+### OpenCode Companion (npm package)
+
+Requires Node.js 24 or newer. After the package is published, install AWC into
+your user-level OpenCode configuration with:
+
+```bash
+npx ai-worker-companion install
+npx ai-worker-companion doctor
+```
+
+The installer preserves existing OpenCode plugins, including
+`oh-my-openagent`, and installs the Health Detector and TUI view into the
+current user's XDG configuration and data directories. To remove only files
+and settings managed by AWC:
+
+```bash
+npx ai-worker-companion uninstall
+```
+
+Known v0.2 limitations:
+
+- The compact indicator appears on a selected OpenCode session, not the home screen.
+- A direct TUI shell command may be reported as `Unknown` when OpenCode records no exit code.
+- The Python Health Detector remains in the repository as a reference implementation; the npm runtime uses TypeScript.
+
+### Repository development
+
+#### 1. Install locally
 
 ```powershell
 python -m venv .venv
@@ -68,7 +95,7 @@ python -m venv .venv
 python -m pip install -e .
 ```
 
-### 2. Print session state
+#### 2. Print session state
 
 Use the public sanitized example:
 
@@ -87,7 +114,7 @@ python session_state.py `
   --format markdown
 ```
 
-### 3. Generate a handoff prompt
+#### 3. Generate a handoff prompt
 
 ```powershell
 python session_state.py `
@@ -97,7 +124,7 @@ python session_state.py `
 
 The handoff prompt is printed to stdout. It is meant to be copied by a human into another agent session.
 
-### 4. Open the Companion mock
+#### 4. Open the Companion mock
 
 Open this file in a browser:
 
@@ -111,7 +138,7 @@ The mock demonstrates the intended UX:
 quiet status -> attention -> recovery handoff
 ```
 
-### 5. Inspect the OpenCode PoC
+#### 5. Inspect the OpenCode PoC
 
 OpenCode is the first integration target.
 
