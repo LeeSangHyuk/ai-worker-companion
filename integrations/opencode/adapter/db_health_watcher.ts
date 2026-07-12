@@ -126,6 +126,18 @@ function elapsedSeconds(part: PartRow, nowMs: number): number | null {
   return Math.max(0, Math.trunc((end - start) / 1000));
 }
 
+function isShellTool(tool: unknown): boolean {
+  return typeof tool === "string" && ["bash", "shell"].includes(tool.toLowerCase());
+}
+
+function hasExplicitError(part: PartRow): boolean {
+  return [
+    nested(part.data, ["error"]),
+    nested(part.data, ["state", "error"]),
+    nested(part.data, ["state", "metadata", "error"]),
+  ].some((value) => value !== null && value !== false && value !== "");
+}
+
 function result(params: {
   health: Health;
   reason: string;
@@ -185,6 +197,7 @@ function assess(options: Options, refreshReason: string) {
     if (!tool) return result({ ...base, session, health: "idle", reason: "No tool has run in the selected session yet." });
 
     const status = nested(tool.data, ["state", "status"]);
+    const toolName = nested(tool.data, ["tool"]);
     const exit = nested(tool.data, ["state", "metadata", "exit"]);
     const toolElapsed = elapsedSeconds(tool, nowMs);
     const lastActivitySeconds = Math.max(0, Math.trunc((nowMs - tool.time_updated) / 1000));
@@ -197,9 +210,13 @@ function assess(options: Options, refreshReason: string) {
       return result({ ...details, health: "stuck", reason: `Tool is running for ${toolElapsed}s, exceeding stuck threshold.` });
     }
     if (status === "completed") {
-      if (exit == null) return result({ ...details, health: "unknown", reason: "Tool completed but exit code is missing." });
-      if (exit === 0) return result({ ...details, health: "idle", reason: "Latest tool completed successfully." });
-      return result({ ...details, health: "failed", reason: `Latest tool completed with non-zero exit code ${exit}.` });
+      if (exit != null) {
+        if (exit === 0) return result({ ...details, health: "idle", reason: "Latest tool completed successfully." });
+        return result({ ...details, health: "failed", reason: `Latest tool completed with non-zero exit code ${exit}.` });
+      }
+      if (hasExplicitError(tool)) return result({ ...details, health: "failed", reason: "Latest tool completed with an explicit error." });
+      if (isShellTool(toolName)) return result({ ...details, health: "unknown", reason: "Shell tool completed but exit code is missing." });
+      return result({ ...details, health: "idle", reason: "Latest non-shell tool completed without an error." });
     }
     return result({ ...details, health: "unknown", reason: `Unknown or unsupported tool status: ${JSON.stringify(status)}.` });
   } catch (error) {
