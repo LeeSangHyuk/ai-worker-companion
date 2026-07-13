@@ -9,13 +9,15 @@
 // The working MVP path is the slash command in .opencode/commands.
 // This plugin exists to validate future status/notification hooks.
 
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
 const SIDEBAR_MIN_WIDTH = 100;
 const HEALTH_REFRESH_THROTTLE_MS = 1500;
+const HEALTH_POLL_INTERVAL_MS = positiveInteger(process.env.AWC_HEALTH_POLL_INTERVAL_MS, 5000);
+const HEALTH_STALE_AFTER_MS = positiveInteger(process.env.AWC_HEALTH_STALE_AFTER_MS, 15000);
 const DEBUG_LAYOUT = process.env.COMPANION_DEBUG_LAYOUT === "1";
 const DEFAULT_OPENCODE_DB = join(homedir(), ".local/share/opencode/opencode.db");
 const HEALTH_REFRESH_EVENTS = new Set([
@@ -39,6 +41,17 @@ const HEALTH_REFRESH_EVENTS = new Set([
   "session.next.tool.success",
   "session.next.tool.failed",
 ]);
+let activeTuiCleanup = null;
+
+export function replaceActiveTuiCleanup(nextCleanup) {
+  if (activeTuiCleanup && activeTuiCleanup !== nextCleanup) activeTuiCleanup();
+  activeTuiCleanup = nextCleanup;
+}
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
 
 function repoRootFromDirectory(directory) {
   return resolve(directory ?? process.cwd());
@@ -103,6 +116,7 @@ function formatCheckedAt(value) {
   return new Date(value * 1000).toLocaleTimeString([], {
     hour: "numeric",
     minute: "2-digit",
+    second: "2-digit",
   });
 }
 
@@ -115,7 +129,20 @@ function parseWatcherOutput(raw) {
   }
 }
 
-function readHealthState(directory) {
+export function executeWatcher(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (error, stdout) => {
+      if (error) {
+        error.stdout = stdout;
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+async function readHealthState(directory, { signal } = {}) {
   const root = repoRootFromDirectory(directory);
   const runtimeDir = process.env.AWC_RUNTIME_DIR ?? join(homedir(), ".local/share/awc");
   const installedWatcher = join(runtimeDir, "adapter/db_health_watcher.ts");
@@ -140,13 +167,15 @@ function readHealthState(directory) {
       toolStatus: null,
       toolElapsedSeconds: null,
       toolExit: null,
+      refreshSucceeded: false,
+      checkedAtMs: null,
     };
   }
 
   try {
     let result;
     try {
-      const stdout = execFileSync(watcherCommand, [
+      const stdout = await executeWatcher(watcherCommand, [
         watcherPath,
         "--db",
         dbPath,
@@ -157,7 +186,7 @@ function readHealthState(directory) {
         cwd: root,
         encoding: "utf8",
         timeout: 3000,
-        stdio: ["ignore", "pipe", "pipe"],
+        signal,
       });
       result = JSON.parse(stdout);
     } catch (error) {
@@ -181,6 +210,8 @@ function readHealthState(directory) {
       toolStatus: tool?.status ?? null,
       toolElapsedSeconds: tool?.elapsed_seconds ?? null,
       toolExit: tool?.exit ?? null,
+      refreshSucceeded: typeof result?.checked_at === "number",
+      checkedAtMs: typeof result?.checked_at === "number" ? result.checked_at * 1000 : null,
     };
   } catch (error) {
     const reason = `Failed to read Health watcher output: ${error instanceof Error ? error.message : String(error)}`;
@@ -196,8 +227,144 @@ function readHealthState(directory) {
       toolStatus: null,
       toolElapsedSeconds: null,
       toolExit: null,
+      refreshSucceeded: false,
+      checkedAtMs: null,
     };
   }
+}
+
+export function createHealthRefreshController({
+  read,
+  requestRender = () => {},
+  now = () => Date.now(),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  pollIntervalMs = HEALTH_POLL_INTERVAL_MS,
+  staleAfterMs = HEALTH_STALE_AFTER_MS,
+  throttleMs = HEALTH_REFRESH_THROTTLE_MS,
+} = {}) {
+  if (typeof read !== "function") throw new TypeError("read must be a function");
+
+  let state = null;
+  let lastSuccessfulRefreshAt = null;
+  let lastRefreshAttemptAt = null;
+  let timer = null;
+  let inFlight = false;
+  let activeAbortController = null;
+  let disposed = false;
+
+  async function refresh({ force = false } = {}) {
+    const attemptedAt = now();
+    if (disposed || inFlight) return false;
+    if (!force && lastRefreshAttemptAt !== null && attemptedAt - lastRefreshAttemptAt < throttleMs) {
+      return false;
+    }
+    lastRefreshAttemptAt = attemptedAt;
+    inFlight = true;
+    activeAbortController = new AbortController();
+
+    let nextState;
+    try {
+      nextState = await read({ signal: activeAbortController.signal });
+    } catch (error) {
+      nextState = {
+        health: "unknown",
+        status: "Unknown",
+        reason: `Failed to refresh Health data: ${error instanceof Error ? error.message : String(error)}`,
+        currentState: "Health data is unavailable.",
+        lastUpdate: "unavailable",
+        refreshSucceeded: false,
+        checkedAtMs: null,
+      };
+    } finally {
+      inFlight = false;
+      activeAbortController = null;
+    }
+
+    if (disposed) return false;
+
+    if (nextState?.refreshSucceeded) {
+      state = nextState;
+      lastSuccessfulRefreshAt = nextState.checkedAtMs ?? attemptedAt;
+      return true;
+    }
+
+    // Preserve the last successful observation across transient failures. The
+    // stale guard below will stop presenting it as current once it ages out.
+    if (state === null) state = nextState;
+    return false;
+  }
+
+  function getState() {
+    if (state === null) {
+      return {
+        health: "unknown",
+        status: "Unknown",
+        reason: "Health data is unavailable.",
+        currentState: "Health data is unavailable.",
+        lastUpdate: "unavailable",
+      };
+    }
+    if (
+      state !== null
+      && lastSuccessfulRefreshAt !== null
+      && now() - lastSuccessfulRefreshAt > staleAfterMs
+    ) {
+      return {
+        ...state,
+        health: "unknown",
+        status: "Unknown",
+        reason: "Health data is stale.",
+        currentState: "Health data is stale.",
+      };
+    }
+    return state;
+  }
+
+  async function tick() {
+    try {
+      await refresh({ force: true });
+    } catch {
+      // Keep the interval alive even if an injected clock or refresh adapter fails.
+    }
+    try {
+      // A failed refresh must not terminate polling or suppress the stale UI.
+      if (!disposed) requestRender();
+    } catch {
+      // A renderer failure must not terminate the polling interval either.
+    }
+  }
+
+  function start() {
+    if (disposed || timer !== null) return;
+    timer = setIntervalFn(tick, pollIntervalMs);
+    timer?.unref?.();
+  }
+
+  function stop() {
+    disposed = true;
+    if (timer !== null) {
+      clearIntervalFn(timer);
+      timer = null;
+    }
+    activeAbortController?.abort();
+  }
+
+  return {
+    refresh,
+    getState,
+    start,
+    stop,
+    tick,
+    isRefreshing: () => inFlight,
+  };
+}
+
+export function registerHealthEventHandlers(eventBus, controller, requestRender) {
+  if (!eventBus?.on) return [];
+  return [...HEALTH_REFRESH_EVENTS].map((eventType) => eventBus.on(eventType, async () => {
+    if (await controller.refresh()) requestRender();
+  }));
 }
 
 function oneLine(value, max = 96) {
@@ -217,17 +384,18 @@ function layoutDebug(api) {
   return { width, mode };
 }
 
-function shouldRefreshHealth(eventType) {
-  return HEALTH_REFRESH_EVENTS.has(eventType);
-}
-
 function textNode(solid, props, value) {
   const node = solid.createElement("text");
   for (const [name, propValue] of Object.entries(props)) {
     solid.setProp(node, name, propValue);
   }
-  solid.insert(node, value);
+  solid.setProp(node, "content", value);
   return node;
+}
+
+export function updateOpenTuiTextNode(solid, node, value, fg) {
+  solid.setProp(node, "content", String(value ?? ""));
+  if (fg !== undefined) solid.setProp(node, "fg", fg);
 }
 
 function boxNode(solid, props, children) {
@@ -241,19 +409,18 @@ function boxNode(solid, props, children) {
   return node;
 }
 
-function renderSidebarSurface(solid, theme, state, debug) {
+function createSidebarSurface(solid, theme, state, debug) {
   const tone = statusColor(theme, state.status);
-  const children = [
-    textNode(solid, { fg: tone }, `Health: ${state.status}`),
-    textNode(solid, { fg: theme.textMuted }, `Reason: ${oneLine(state.reason ?? state.currentState, 72)}`),
-    textNode(solid, { fg: theme.textMuted }, `Tool: ${oneLine(formatToolDetail(state), 72)}`),
-    textNode(solid, { fg: theme.textMuted }, `Last Update: ${state.lastUpdate}`),
-  ];
+  const healthNode = textNode(solid, { fg: tone }, `Health: ${state.status}`);
+  const reasonNode = textNode(solid, { fg: theme.textMuted }, `Reason: ${oneLine(state.reason ?? state.currentState, 72)}`);
+  const toolNode = textNode(solid, { fg: theme.textMuted }, `Tool: ${oneLine(formatToolDetail(state), 72)}`);
+  const lastCheckNode = textNode(solid, { fg: theme.textMuted }, `Last Check: ${state.lastUpdate}`);
+  const children = [healthNode, reasonNode, toolNode, lastCheckNode];
   if (debug) {
     children.push(textNode(solid, { fg: theme.textMuted }, `debug: width=${debug.width} mode=${debug.mode}`));
   }
 
-  return boxNode(
+  const node = boxNode(
     solid,
     {
       borderStyle: "single",
@@ -263,15 +430,33 @@ function renderSidebarSurface(solid, theme, state, debug) {
     },
     children,
   );
+  return {
+    node,
+    update(nextState) {
+      updateOpenTuiTextNode(solid, healthNode, `Health: ${nextState.status}`, statusColor(theme, nextState.status));
+      updateOpenTuiTextNode(solid, reasonNode, `Reason: ${oneLine(nextState.reason ?? nextState.currentState, 72)}`);
+      updateOpenTuiTextNode(solid, toolNode, `Tool: ${oneLine(formatToolDetail(nextState), 72)}`);
+      updateOpenTuiTextNode(solid, lastCheckNode, `Last Check: ${nextState.lastUpdate}`);
+    },
+  };
 }
 
-function renderCompactStatus(solid, theme, state, debug) {
+function createCompactStatus(solid, theme, state, debug) {
   const label = DEBUG_LAYOUT && debug ? `● ${state.status} · debug: width=${debug.width} mode=${debug.mode}` : `● ${state.status}`;
-  return textNode(
+  const node = textNode(
     solid,
     { fg: statusColor(theme, state.status), wrapMode: "none" },
     label,
   );
+  return {
+    node,
+    update(nextState) {
+      const nextLabel = DEBUG_LAYOUT && debug
+        ? `● ${nextState.status} · debug: width=${debug.width} mode=${debug.mode}`
+        : `● ${nextState.status}`;
+      updateOpenTuiTextNode(solid, node, nextLabel, statusColor(theme, nextState.status));
+    },
+  };
 }
 
 export const AgentCompanionPlugin = async ({ client }) => {
@@ -317,6 +502,10 @@ export const AgentCompanionPlugin = async ({ client }) => {
 export const tui = async (api, _options, meta) => {
   if (!api?.slots?.register) return {};
 
+  // OpenCode may reload a TUI module before the previous lifecycle callback
+  // runs. Stop the previous runtime defensively so only one poller survives.
+  replaceActiveTuiCleanup(null);
+
   const solid = await import("@opentui/solid").catch(() => null);
   if (!solid) {
     api.ui?.toast?.({
@@ -329,30 +518,43 @@ export const tui = async (api, _options, meta) => {
   }
 
   const directory = api.state?.path?.directory ?? process.cwd();
-  let state = readHealthState(directory);
-  let lastHealthRefreshAt = Date.now();
-
-  function refreshHealth({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && now - lastHealthRefreshAt < HEALTH_REFRESH_THROTTLE_MS) return false;
-
-    state = readHealthState(directory);
-    lastHealthRefreshAt = now;
-    return true;
+  const surfaceBindings = new Set();
+  let controller;
+  function updateMountedSurfaces() {
+    const nextState = controller.getState();
+    for (const binding of [...surfaceBindings]) {
+      try {
+        binding.update(nextState);
+      } catch {
+        // A slot may be destroyed during navigation before lifecycle disposal.
+        surfaceBindings.delete(binding);
+      }
+    }
+    api.renderer?.requestRender?.();
   }
+  controller = createHealthRefreshController({
+    read: ({ signal }) => readHealthState(directory, { signal }),
+    requestRender: updateMountedSurfaces,
+  });
+  await controller.refresh({ force: true });
 
   function renderCompactSurface() {
-    refreshHealth();
+    const state = controller.getState();
     const debug = DEBUG_LAYOUT ? layoutDebug(api) : null;
-    return renderCompactStatus(solid, api.theme.current, state, debug);
+    const binding = createCompactStatus(solid, api.theme.current, state, debug);
+    surfaceBindings.add(binding);
+    return binding.node;
   }
 
   const renderers = {
     session_prompt_right: renderCompactSurface,
     sidebar_content: () => {
-      refreshHealth();
+      const state = controller.getState();
       const debug = DEBUG_LAYOUT ? layoutDebug(api) : null;
-      return isCompactLayout(api) ? null : renderSidebarSurface(solid, api.theme.current, state, debug);
+      if (isCompactLayout(api)) return null;
+      const binding = createSidebarSurface(solid, api.theme.current, state, debug);
+      surfaceBindings.add(binding);
+      return binding.node;
     },
   };
 
@@ -360,9 +562,10 @@ export const tui = async (api, _options, meta) => {
     order: 10000,
     slots: renderers,
   });
+  controller.start();
   api.renderer?.requestRender?.();
 
-  if (state.status === "Unknown") {
+  if (controller.getState().status === "Unknown") {
     api.ui?.toast?.({
       variant: "warning",
       title: "AI Worker Companion",
@@ -371,12 +574,21 @@ export const tui = async (api, _options, meta) => {
     });
   }
 
-  return {
-    event: async ({ event }) => {
-      if (!shouldRefreshHealth(event?.type)) return;
-      if (refreshHealth()) {
-        api.renderer?.requestRender?.();
-      }
-    },
+  const removeEventHandlers = registerHealthEventHandlers(
+    api.event,
+    controller,
+    updateMountedSurfaces,
+  );
+
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    controller.stop();
+    for (const remove of removeEventHandlers) remove();
+    surfaceBindings.clear();
+    if (activeTuiCleanup === cleanup) activeTuiCleanup = null;
   };
+  replaceActiveTuiCleanup(cleanup);
+  api.lifecycle?.onDispose?.(cleanup);
 };

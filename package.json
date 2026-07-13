@@ -1,6 +1,6 @@
 {
   "name": "ai-worker-companion",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Health companion for OpenCode sessions",
   "keywords": [
     "opencode",
@@ -27,6 +27,9 @@
   "scripts": {
     "test": "node --test npm/test/*.test.js",
     "test:npm-poc": "npm test"
+  },
+  "devDependencies": {
+    "@opentui/core": "0.2.16"
   },
   "files": [
     "bin/",

@@ -2,6 +2,11 @@
 
 AI workers shouldn't fail silently.
 
+> **Early Preview:** AWC is an experimental local companion, not a production
+> monitoring or supervision system. Health labels are best-effort interpretations
+> of the latest OpenCode session/tool state and can be `Unknown` when the available
+> state is incomplete or stale.
+
 AI Worker Companion is an agent-agnostic layer for understanding, monitoring, and recovering long-running AI agent sessions. It turns session state into a readable status, calls attention to possible blockers, and prepares a human-approved handoff prompt when work needs to continue elsewhere.
 
 ```text
@@ -62,7 +67,7 @@ Core Engine
 
 ### OpenCode Companion (npm package)
 
-Requires Node.js 24 or newer. After the package is published, install AWC into
+Requires Node.js 24 or newer. Install AWC into
 your user-level OpenCode configuration with:
 
 ```bash
@@ -79,10 +84,14 @@ and settings managed by AWC:
 npx ai-worker-companion uninstall
 ```
 
-Known v0.2 limitations:
+Current detection limits:
 
 - The compact indicator appears on a selected OpenCode session, not the home screen.
 - A direct TUI shell command may be reported as `Unknown` when OpenCode records no exit code.
+- Provider/model retry loops are not currently detected as a separate Health state.
+- OMO subagent lifecycle and stuck detection are not part of the supported Health model.
+- AWC observes the latest OpenCode session/tool records; it does not provide an agent heartbeat or prove that a long-running operation is making progress.
+- When watcher data cannot be refreshed, AWC changes the displayed Health to `Unknown` after the stale threshold instead of treating the previous result as current.
 - The Python Health Detector remains in the repository as a reference implementation; the npm runtime uses TypeScript.
 
 ### Repository development
