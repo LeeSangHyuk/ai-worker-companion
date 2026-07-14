@@ -34,6 +34,13 @@ type PartRow = {
   data: Record<string, unknown>;
 };
 
+type SessionActivity = {
+  latestPart: PartRow | null;
+  latestTool: PartRow | null;
+  latestStepStart: PartRow | null;
+  latestStepFinish: PartRow | null;
+};
+
 function parseArgs(argv: string[]): Options {
   const values = new Map<string, string>();
   let once = false;
@@ -102,19 +109,38 @@ function latestSession(db: DatabaseSync, selector: string): SessionRow | null {
   return (selector === "latest" ? db.prepare(sql).get() : db.prepare(sql).get(selector)) as SessionRow | undefined ?? null;
 }
 
-function latestTool(db: DatabaseSync, sessionId: string): PartRow | null {
+function latestActivity(db: DatabaseSync, sessionId: string): SessionActivity {
   const rows = db.prepare(
     "select id, time_created, time_updated, data from part where session_id = ? order by time_updated desc limit 100",
   ).all(sessionId) as Array<Omit<PartRow, "data"> & { data: string }>;
+  const activity: SessionActivity = {
+    latestPart: null,
+    latestTool: null,
+    latestStepStart: null,
+    latestStepFinish: null,
+  };
+
   for (const row of rows) {
     try {
       const data = JSON.parse(row.data);
-      if (data && typeof data === "object" && data.type === "tool") return { ...row, data };
+      if (!data || typeof data !== "object") continue;
+      const part = { ...row, data };
+      const type = data.type;
+      if (activity.latestPart === null) activity.latestPart = part;
+      if (type === "tool" && activity.latestTool === null) activity.latestTool = part;
+      if (type === "step-start" && activity.latestStepStart === null) activity.latestStepStart = part;
+      if (type === "step-finish" && activity.latestStepFinish === null) activity.latestStepFinish = part;
+      if (
+        activity.latestPart
+        && activity.latestTool
+        && activity.latestStepStart
+        && activity.latestStepFinish
+      ) break;
     } catch {
       // Match the Python watcher: malformed part JSON is skipped.
     }
   }
-  return null;
+  return activity;
 }
 
 function elapsedSeconds(part: PartRow, nowMs: number): number | null {
@@ -138,6 +164,28 @@ function hasExplicitError(part: PartRow): boolean {
   ].some((value) => value !== null && value !== false && value !== "");
 }
 
+function partType(part: PartRow | null): unknown {
+  return part ? nested(part.data, ["type"]) : null;
+}
+
+function stepReason(part: PartRow | null): unknown {
+  return part ? nested(part.data, ["reason"]) : null;
+}
+
+function isStepUnfinished(activity: SessionActivity): boolean {
+  if (!activity.latestStepStart) return false;
+  if (!activity.latestStepFinish) return true;
+  return activity.latestStepStart.time_updated > activity.latestStepFinish.time_updated;
+}
+
+function latestActivityPart(activity: SessionActivity): PartRow | null {
+  return activity.latestPart;
+}
+
+function activityElapsedSeconds(part: PartRow, nowMs: number): number {
+  return Math.max(0, Math.trunc((nowMs - part.time_updated) / 1000));
+}
+
 function result(params: {
   health: Health;
   reason: string;
@@ -146,12 +194,14 @@ function result(params: {
   checkedAt: number;
   session?: SessionRow | null;
   tool?: PartRow | null;
+  activity?: SessionActivity | null;
   lastActivitySeconds?: number | null;
   toolElapsed?: number | null;
 }) {
-  const { health, reason, options, refreshReason, checkedAt, session = null, tool = null } = params;
+  const { health, reason, options, refreshReason, checkedAt, session = null, tool = null, activity = null } = params;
   const wal = walState(options.db);
   const seconds = (value: unknown) => value == null ? null : Math.trunc(Number(value) / 1000);
+  const latestPart = activity ? latestActivityPart(activity) : null;
   return {
     health,
     reason,
@@ -176,6 +226,14 @@ function result(params: {
       elapsed_seconds: params.toolElapsed ?? null,
     },
     last_activity_seconds: params.lastActivitySeconds ?? null,
+    activity: {
+      latest_activity_type: partType(latestPart),
+      latest_activity_at: seconds(latestPart?.time_updated),
+      latest_tool_at: seconds(tool?.time_updated),
+      latest_step_reason: stepReason(activity?.latestStepFinish ?? null),
+      latest_step_start_at: seconds(activity?.latestStepStart?.time_updated),
+      latest_step_finish_at: seconds(activity?.latestStepFinish?.time_updated),
+    },
     thresholds: { quiet_seconds: options.quietThreshold, stuck_seconds: options.stuckThreshold },
     wal: { path: wal.path, exists: wal.exists, size_bytes: wal.size_bytes, mtime: wal.mtime },
   };
@@ -193,15 +251,39 @@ function assess(options: Options, refreshReason: string) {
     db = new DatabaseSync(options.db, { readOnly: true, timeout: 1000 });
     const session = latestSession(db, options.session);
     if (!session) return result({ ...base, health: "unknown", reason: "No matching OpenCode session found." });
-    const tool = latestTool(db, session.id);
-    if (!tool) return result({ ...base, session, health: "idle", reason: "No tool has run in the selected session yet." });
+    const activity = latestActivity(db, session.id);
+    const tool = activity.latestTool;
+    const latestPart = latestActivityPart(activity);
+    const latestActivitySeconds = latestPart ? activityElapsedSeconds(latestPart, nowMs) : null;
+    const activityDetails = { ...base, session, tool, activity, lastActivitySeconds: latestActivitySeconds };
+
+    const latestStepFinish = activity.latestStepFinish;
+    const latestStepReason = stepReason(latestStepFinish);
+    const latestStepFinishIsError = latestStepReason === "error"
+      && (!tool || latestStepFinish!.time_updated >= tool.time_updated);
+    if (latestStepFinishIsError) {
+      return result({
+        ...activityDetails,
+        health: "failed",
+        reason: "Latest session step finished with error.",
+      });
+    }
+
+    if (!tool) {
+      if (isStepUnfinished(activity)) {
+        const stepElapsed = activityElapsedSeconds(activity.latestStepStart!, nowMs);
+        if (stepElapsed < options.quietThreshold) return result({ ...activityDetails, health: "active", reason: `Session step is active for ${stepElapsed}s, below quiet threshold.` });
+        if (stepElapsed < options.stuckThreshold) return result({ ...activityDetails, health: "quiet", reason: `Session step is active for ${stepElapsed}s, below stuck threshold.` });
+        return result({ ...activityDetails, health: "stuck", reason: `Session step is active for ${stepElapsed}s, exceeding stuck threshold.` });
+      }
+      return result({ ...activityDetails, health: "idle", reason: latestPart ? "Latest session activity completed; no tool has run in the selected session yet." : "No activity has run in the selected session yet." });
+    }
 
     const status = nested(tool.data, ["state", "status"]);
     const toolName = nested(tool.data, ["tool"]);
     const exit = nested(tool.data, ["state", "metadata", "exit"]);
     const toolElapsed = elapsedSeconds(tool, nowMs);
-    const lastActivitySeconds = Math.max(0, Math.trunc((nowMs - tool.time_updated) / 1000));
-    const details = { ...base, session, tool, toolElapsed, lastActivitySeconds };
+    const details = { ...activityDetails, toolElapsed };
 
     if (status === "running") {
       if (toolElapsed === null) return result({ ...details, health: "unknown", reason: "Tool is running but start time could not be determined." });
@@ -209,6 +291,25 @@ function assess(options: Options, refreshReason: string) {
       if (toolElapsed < options.stuckThreshold) return result({ ...details, health: "quiet", reason: `Tool is running for ${toolElapsed}s, below stuck threshold.` });
       return result({ ...details, health: "stuck", reason: `Tool is running for ${toolElapsed}s, exceeding stuck threshold.` });
     }
+
+    if (isStepUnfinished(activity) && activity.latestStepStart!.time_updated > tool.time_updated) {
+      const stepElapsed = activityElapsedSeconds(activity.latestStepStart!, nowMs);
+      if (stepElapsed < options.quietThreshold) return result({ ...details, health: "active", reason: `Session step is active for ${stepElapsed}s, below quiet threshold.` });
+      if (stepElapsed < options.stuckThreshold) return result({ ...details, health: "quiet", reason: `Session step is active for ${stepElapsed}s, below stuck threshold.` });
+      return result({ ...details, health: "stuck", reason: `Session step is active for ${stepElapsed}s, exceeding stuck threshold.` });
+    }
+
+    if (latestPart && latestPart.time_updated > tool.time_updated) {
+      const latestType = partType(latestPart);
+      return result({
+        ...details,
+        health: "idle",
+        reason: latestType === "step-finish"
+          ? "Latest session step completed; no active tool is running."
+          : "Latest session activity completed; no active tool is running.",
+      });
+    }
+
     if (status === "completed") {
       if (exit != null) {
         if (exit === 0) return result({ ...details, health: "idle", reason: "Latest tool completed successfully." });

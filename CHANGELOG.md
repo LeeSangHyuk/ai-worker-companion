@@ -1,6 +1,28 @@
 # Changelog
 
-## 0.2.2 - Unreleased
+## 0.2.3 - Unreleased
+
+### Changed
+
+- Consider latest session lifecycle activity alongside the latest tool when computing Health.
+- Give newer `step-finish` errors priority over older completed tools.
+- Treat unfinished session steps as `active`, `quiet`, or `stuck` using the existing quiet/stuck thresholds.
+- Avoid presenting an older completed tool as the current reason when newer session activity exists.
+- Add non-sensitive activity metadata to watcher output for debugging:
+  `latest_activity_type`, `latest_activity_at`, `latest_tool_at`, `latest_step_reason`,
+  `latest_step_start_at`, and `latest_step_finish_at`.
+
+### Validation
+
+- Added fixtures for newer step errors, newer completed session activity, unfinished step thresholds,
+  running tool precedence over older step evidence, and stale watcher behavior.
+
+### Deferred
+
+- Provider retry detection, OpenCode log parsing, OMO subagent aggregation, selected TUI session ID
+  routing, natural-language assistant text analysis, and new Health enum values remain out of scope.
+
+## 0.2.2
 
 ### Fixed
 
