@@ -1,6 +1,31 @@
 # Changelog
 
-## 0.2.4 - Unreleased
+## 0.2.5 - Unreleased
+
+### Changed
+
+- Add direct Parent/Child session Health visibility using OpenCode `session.parent_id`.
+- Compute top-level Health as Overall Health across the selected parent and included direct children.
+- Keep Parent Health separate from Overall Health so a parent can be `Idle` while a child is `Active`,
+  `Quiet`, `Stuck`, `Failed`, or `Unknown`.
+- Add child summary metadata to watcher output, including child counts by Health state and a display limit.
+- Show `Overall`, `Parent`, `Children`, and up to five child details in the OpenCode sidebar.
+- Reuse existing session lifecycle, tool, and provider retry evidence for each direct child session.
+- Exclude old idle or old failed child sessions from Overall Health after the recent-child window, and
+  avoid letting older child failures override a newer normal parent step finish.
+
+### Validation
+
+- Added fixtures for parent idle with child active/quiet/stuck, parent active with child failed,
+  mixed child states, old child exclusion, child provider retry, child unknown, child naming,
+  problem-state sorting, display limit handling, and selected-child root parent resolution.
+
+### Deferred
+
+- Recursive/nested child UI, OMO integration, selected TUI session routing, natural-language assistant
+  text analysis, notifications, and new Health enum values remain out of scope.
+
+## 0.2.4
 
 ### Changed
 

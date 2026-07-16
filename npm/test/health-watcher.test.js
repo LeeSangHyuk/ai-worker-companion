@@ -66,22 +66,48 @@ async function assess({
   error,
   startedAgo = 0,
   parts,
+  sessions,
   retryLines = [],
   retryCursor,
   retryLogDir,
   disableProviderRetry = false,
+  session = "latest",
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "awc-health-"));
   const dbPath = join(directory, "opencode.db");
   const db = new DatabaseSync(dbPath);
-  db.exec("create table session (id text, title text, directory text, time_created integer, time_updated integer)");
+  db.exec("create table session (id text, parent_id text, title text, directory text, agent text, model text, time_created integer, time_updated integer, time_archived integer)");
   db.exec("create table part (id text, session_id text, time_created integer, time_updated integer, data text)");
-  db.prepare("insert into session values (?, ?, ?, ?, ?)").run("ses_test", "test", directory, nowMs, nowMs);
-  const timeline = parts ?? [toolPart({ tool, status, exit, error, startedAgo })];
-  const insert = db.prepare("insert into part values (?, ?, ?, ?, ?)");
-  timeline.forEach((part, index) => {
-    const time = nowMs + part.at * 1000;
-    insert.run(`prt_${index}`, "ses_test", time, time, JSON.stringify(part.data));
+  const sessionRows = sessions ?? [{
+    id: "ses_test",
+    parent_id: null,
+    title: "test",
+    agent: "parent",
+    model: null,
+    at: 0,
+    parts: parts ?? [toolPart({ tool, status, exit, error, startedAgo })],
+  }];
+  const insertSession = db.prepare("insert into session values (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const insertPart = db.prepare("insert into part values (?, ?, ?, ?, ?)");
+  sessionRows.forEach((row, sessionIndex) => {
+    const rowParts = row.parts ?? [];
+    const latestPartAt = rowParts.reduce((latest, part) => Math.max(latest, part.at ?? 0), row.at ?? 0);
+    const sessionTime = nowMs + latestPartAt * 1000;
+    insertSession.run(
+      row.id,
+      row.parent_id ?? null,
+      row.title ?? row.id,
+      directory,
+      row.agent ?? null,
+      row.model ?? null,
+      nowMs + (row.at ?? 0) * 1000,
+      sessionTime,
+      row.time_archived ?? null,
+    );
+    rowParts.forEach((part, partIndex) => {
+      const time = nowMs + part.at * 1000;
+      insertPart.run(`prt_${sessionIndex}_${partIndex}`, row.id, time, time, JSON.stringify(part.data));
+    });
   });
   db.close();
   let logDir = retryLogDir;
@@ -94,7 +120,7 @@ async function assess({
   const args = [
     watcher,
     "--db", dbPath,
-    "--session", "latest",
+    "--session", session,
     "--quiet-threshold", "60",
     "--stuck-threshold", "180",
     "--now-ms", String(nowMs),
@@ -294,4 +320,230 @@ test("retryable auth provider errors are ignored in 0.2.4", async () => {
   });
   assert.equal(output.health, "idle");
   assert.equal(output.provider_retry.active, false);
+});
+
+function parentChildSessions({ parentParts = [toolPart({ tool: "read", status: "completed", at: -60 })], children = [] } = {}) {
+  return [
+    {
+      id: "ses_parent",
+      parent_id: null,
+      title: "parent",
+      agent: "parent-agent",
+      parts: parentParts,
+    },
+    ...children.map((child, index) => ({
+      id: child.id ?? `ses_child_${index + 1}`,
+      parent_id: "ses_parent",
+      title: child.title ?? `child ${index + 1}`,
+      agent: child.agent ?? `child-${index + 1}`,
+      model: child.model ?? null,
+      parts: child.parts ?? [],
+    })),
+  ];
+}
+
+test("no_children preserves parent-only overall health", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions(),
+  });
+  assert.equal(output.health, "idle");
+  assert.equal(output.overall.cause, "parent");
+  assert.equal(output.parent.health, "idle");
+  assert.equal(output.children_summary.total, 0);
+});
+
+test("parent_idle_child_active makes overall active", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ agent: "explore", parts: [toolPart({ tool: "bash", status: "running", at: -10, startedAgo: 10 })] }],
+    }),
+  });
+  assert.equal(output.health, "active");
+  assert.equal(output.parent.health, "idle");
+  assert.equal(output.overall.cause, "child");
+  assert.equal(output.children_summary.active, 1);
+  assert.match(output.reason, /Child explore is active/);
+});
+
+test("parent_idle_child_quiet makes overall quiet", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ parts: [toolPart({ tool: "bash", status: "running", at: -10, startedAgo: 90 })] }],
+    }),
+  });
+  assert.equal(output.health, "quiet");
+  assert.equal(output.children_summary.quiet, 1);
+});
+
+test("parent_idle_child_stuck makes overall stuck", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ parts: [toolPart({ tool: "bash", status: "running", at: -240, startedAgo: 240 })] }],
+    }),
+  });
+  assert.equal(output.health, "stuck");
+  assert.equal(output.children_summary.stuck, 1);
+});
+
+test("parent_active_child_failed makes overall failed", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      parentParts: [toolPart({ tool: "bash", status: "running", at: -5, startedAgo: 5 })],
+      children: [{ agent: "test-agent", parts: [toolPart({ tool: "bash", status: "completed", exit: 1, at: -10 })] }],
+    }),
+  });
+  assert.equal(output.health, "failed");
+  assert.equal(output.parent.health, "active");
+  assert.equal(output.children_summary.failed, 1);
+  assert.match(output.reason, /Child test-agent is failed/);
+});
+
+test("multiple_children_mixed_health chooses highest priority child", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [
+        { agent: "explore", parts: [toolPart({ tool: "bash", status: "running", at: -10, startedAgo: 10 })] },
+        { agent: "librarian", parts: [toolPart({ tool: "bash", status: "running", at: -10, startedAgo: 90 })] },
+        { agent: "test-agent", parts: [toolPart({ tool: "bash", status: "completed", exit: 1, at: -20 })] },
+      ],
+    }),
+  });
+  assert.equal(output.health, "failed");
+  assert.equal(output.children_summary.active, 1);
+  assert.equal(output.children_summary.quiet, 1);
+  assert.equal(output.children_summary.failed, 1);
+  assert.equal(output.children[0].name, "test-agent");
+});
+
+test("old_idle_children_do_not_pollute_overall", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ parts: [toolPart({ tool: "read", status: "completed", at: -4000 })] }],
+    }),
+  });
+  assert.equal(output.health, "idle");
+  assert.equal(output.children_summary.included, 0);
+  assert.equal(output.children[0].excluded_reason, "old_child");
+});
+
+test("old_failed_child_does_not_pollute_after_recent_window", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ parts: [toolPart({ tool: "bash", status: "completed", exit: 1, at: -4000 })] }],
+    }),
+  });
+  assert.equal(output.health, "idle");
+  assert.equal(output.children_summary.failed, 0);
+  assert.equal(output.children[0].included, false);
+});
+
+test("parent_newer_normal_finish_excludes_old_child_failure", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      parentParts: [stepStart({ at: -20 }), stepFinish({ at: -10, reason: "stop" })],
+      children: [{ parts: [toolPart({ tool: "bash", status: "completed", exit: 1, at: -60 })] }],
+    }),
+  });
+  assert.equal(output.health, "idle");
+  assert.equal(output.children[0].included, false);
+  assert.equal(output.children[0].excluded_reason, "parent_newer_normal_finish");
+});
+
+test("child_provider_retry drives overall stuck", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ id: "ses_child_retry", agent: "retry-child", parts: [toolPart({ tool: "write", status: "completed", at: -120 })] }],
+    }),
+    retryLines: [
+      retryLine({ session: "ses_child_retry", at: -30, retryDelay: 5 }),
+      retryLine({ session: "ses_child_retry", at: -20, retryDelay: 5 }),
+      retryLine({ session: "ses_child_retry", at: -10, retryDelay: 5 }),
+    ],
+  });
+  assert.equal(output.health, "stuck");
+  assert.equal(output.children_summary.stuck, 1);
+  assert.equal(output.children[0].provider_retry.active, true);
+  assert.match(output.reason, /retry-child/);
+});
+
+test("child_unknown participates in overall when recent", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ parts: [toolPart({ tool: "bash", status: "completed", at: -10 })] }],
+    }),
+  });
+  assert.equal(output.health, "unknown");
+  assert.equal(output.children_summary.unknown, 1);
+});
+
+test("child_agent_name_from_session_agent", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ agent: "explore", parts: [toolPart({ tool: "read", status: "completed", at: -10 })] }],
+    }),
+  });
+  assert.equal(output.children[0].name, "explore");
+});
+
+test("fallback_child_name_from_title", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [{ agent: "", title: "Research something (@librarian subagent)", parts: [toolPart({ tool: "read", status: "completed", at: -10 })] }],
+    }),
+  });
+  assert.equal(output.children[0].name, "librarian");
+});
+
+test("child_sort_problem_states_first", async () => {
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({
+      children: [
+        { agent: "active-child", parts: [toolPart({ tool: "bash", status: "running", at: -1, startedAgo: 1 })] },
+        { agent: "failed-child", parts: [toolPart({ tool: "bash", status: "completed", exit: 1, at: -20 })] },
+      ],
+    }),
+  });
+  assert.equal(output.children[0].name, "failed-child");
+  assert.equal(output.children[1].name, "active-child");
+});
+
+test("many_children_ui_summary exposes max five and more count", async () => {
+  const children = Array.from({ length: 7 }, (_, index) => ({
+    agent: `child-${index + 1}`,
+    parts: [toolPart({ tool: "bash", status: "running", at: -index - 1, startedAgo: index + 1 })],
+  }));
+  const output = await assess({
+    session: "ses_parent",
+    sessions: parentChildSessions({ children }),
+  });
+  assert.equal(output.children_summary.total, 7);
+  assert.equal(output.children_summary.included, 7);
+  assert.equal(output.children_summary.shown, 5);
+  assert.equal(output.children_summary.more, 2);
+});
+
+test("selected_child_climbs_to_root_parent", async () => {
+  const output = await assess({
+    session: "ses_child_1",
+    sessions: parentChildSessions({
+      children: [{ parts: [toolPart({ tool: "bash", status: "running", at: -10, startedAgo: 10 })] }],
+    }),
+  });
+  assert.equal(output.parent.session_id, "ses_parent");
+  assert.equal(output.parent.selected_session_id, "ses_child_1");
+  assert.equal(output.health, "active");
 });

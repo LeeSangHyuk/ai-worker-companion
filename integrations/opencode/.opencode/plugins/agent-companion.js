@@ -111,6 +111,27 @@ function formatToolDetail(state) {
   return parts.length > 0 ? parts.join(" · ") : "none";
 }
 
+function formatChildrenSummary(summary) {
+  if (!summary || typeof summary.total !== "number" || summary.total === 0) return "none";
+  const parts = [];
+  for (const [key, label] of [
+    ["failed", "failed"],
+    ["stuck", "stuck"],
+    ["active", "active"],
+    ["quiet", "quiet"],
+    ["unknown", "unknown"],
+    ["idle", "idle"],
+  ]) {
+    if (summary[key] > 0) parts.push(`${summary[key]} ${label}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : "none active";
+}
+
+function formatChildLine(child) {
+  if (!child) return "";
+  return `- ${oneLine(child.name ?? child.session_id ?? "child", 28)}: ${labelForHealth(child.health)}`;
+}
+
 function formatCheckedAt(value) {
   if (typeof value !== "number") return "unavailable";
   return new Date(value * 1000).toLocaleTimeString([], {
@@ -197,6 +218,11 @@ async function readHealthState(directory, { signal } = {}) {
     const reason = result?.reason ?? "No health reason returned by watcher.";
     const health = result?.health ?? "unknown";
     const tool = result?.tool ?? {};
+    const parent = result?.parent ?? null;
+    const childrenSummary = result?.children_summary ?? null;
+    const childDetails = Array.isArray(result?.children)
+      ? result.children.filter((child) => child?.included !== false).slice(0, 5)
+      : [];
 
     return {
       health,
@@ -210,6 +236,11 @@ async function readHealthState(directory, { signal } = {}) {
       toolStatus: tool?.status ?? null,
       toolElapsedSeconds: tool?.elapsed_seconds ?? null,
       toolExit: tool?.exit ?? null,
+      parentStatus: parent?.health ? labelForHealth(parent.health) : null,
+      parentReason: parent?.reason ?? null,
+      childrenSummary,
+      childrenLabel: formatChildrenSummary(childrenSummary),
+      childDetails,
       refreshSucceeded: typeof result?.checked_at === "number",
       checkedAtMs: typeof result?.checked_at === "number" ? result.checked_at * 1000 : null,
     };
@@ -227,6 +258,11 @@ async function readHealthState(directory, { signal } = {}) {
       toolStatus: null,
       toolElapsedSeconds: null,
       toolExit: null,
+      parentStatus: null,
+      parentReason: null,
+      childrenSummary: null,
+      childrenLabel: "none",
+      childDetails: [],
       refreshSucceeded: false,
       checkedAtMs: null,
     };
@@ -411,11 +447,19 @@ function boxNode(solid, props, children) {
 
 function createSidebarSurface(solid, theme, state, debug) {
   const tone = statusColor(theme, state.status);
-  const healthNode = textNode(solid, { fg: tone }, `Health: ${state.status}`);
+  const healthNode = textNode(solid, { fg: tone }, `Overall: ${state.status}`);
+  const parentNode = textNode(solid, { fg: theme.textMuted }, `Parent: ${state.parentStatus ?? state.status}`);
+  const childrenNode = textNode(solid, { fg: theme.textMuted }, `Children: ${state.childrenLabel ?? "none"}`);
+  const childNodes = Array.from({ length: 5 }, (_, index) => textNode(
+    solid,
+    { fg: theme.textMuted },
+    formatChildLine(state.childDetails?.[index]),
+  ));
+  const moreNode = textNode(solid, { fg: theme.textMuted }, state.childrenSummary?.more > 0 ? `+${state.childrenSummary.more} more` : "");
   const reasonNode = textNode(solid, { fg: theme.textMuted }, `Reason: ${oneLine(state.reason ?? state.currentState, 72)}`);
   const toolNode = textNode(solid, { fg: theme.textMuted }, `Tool: ${oneLine(formatToolDetail(state), 72)}`);
   const lastCheckNode = textNode(solid, { fg: theme.textMuted }, `Last Check: ${state.lastUpdate}`);
-  const children = [healthNode, reasonNode, toolNode, lastCheckNode];
+  const children = [healthNode, parentNode, childrenNode, ...childNodes, moreNode, reasonNode, toolNode, lastCheckNode];
   if (debug) {
     children.push(textNode(solid, { fg: theme.textMuted }, `debug: width=${debug.width} mode=${debug.mode}`));
   }
@@ -433,7 +477,13 @@ function createSidebarSurface(solid, theme, state, debug) {
   return {
     node,
     update(nextState) {
-      updateOpenTuiTextNode(solid, healthNode, `Health: ${nextState.status}`, statusColor(theme, nextState.status));
+      updateOpenTuiTextNode(solid, healthNode, `Overall: ${nextState.status}`, statusColor(theme, nextState.status));
+      updateOpenTuiTextNode(solid, parentNode, `Parent: ${nextState.parentStatus ?? nextState.status}`);
+      updateOpenTuiTextNode(solid, childrenNode, `Children: ${nextState.childrenLabel ?? "none"}`);
+      for (let index = 0; index < childNodes.length; index += 1) {
+        updateOpenTuiTextNode(solid, childNodes[index], formatChildLine(nextState.childDetails?.[index]));
+      }
+      updateOpenTuiTextNode(solid, moreNode, nextState.childrenSummary?.more > 0 ? `+${nextState.childrenSummary.more} more` : "");
       updateOpenTuiTextNode(solid, reasonNode, `Reason: ${oneLine(nextState.reason ?? nextState.currentState, 72)}`);
       updateOpenTuiTextNode(solid, toolNode, `Tool: ${oneLine(formatToolDetail(nextState), 72)}`);
       updateOpenTuiTextNode(solid, lastCheckNode, `Last Check: ${nextState.lastUpdate}`);
