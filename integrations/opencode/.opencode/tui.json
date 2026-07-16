@@ -1,5 +1,0 @@
-{
-  "plugin": [
-    "./tui-plugins/agent-companion.js"
-  ]
-}

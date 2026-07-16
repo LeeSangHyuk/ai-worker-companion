@@ -1,280 +1,336 @@
 # Architecture
 
-## Current Positioning
+This document describes the AI Worker Companion architecture as of
+`ai-worker-companion@0.2.5`.
 
-This project is currently an **Evidence-grounded Session Representation Engine**.
-
-The core purpose is to turn long AI sessions into compact, evidence-backed representations that help a human understand and resume the session quickly.
-
-The current representation focuses on:
-
-- Goal Stack
-- Current Situation
-- Blocker
-- Evidence
-
-The long-term vision may become a **Session Supervision Layer**, but the current implementation should not overclaim that position yet.
-
-## Layer Model
-
-The project should be understood as three layers:
-
-1. Core Engine
-2. Extension Layer
-3. Provider Layer
-
-```mermaid
-flowchart TB
-    subgraph Extensions["Extension Layer: thin wrappers"]
-        Codex["Codex plugin"]
-        ClaudeCode["Claude Code slash commands"]
-        Cursor["Cursor / VS Code"]
-        Desktop["Desktop app later"]
-    end
-
-    subgraph Core["Core Engine: product logic"]
-        Import["Import"]
-        Normalize["Normalize"]
-        Load["Load Events"]
-        Extract["Generate Representation"]
-        Batch["Batch Runner"]
-        Analyze["Batch Result Analysis"]
-        Report["Human Evaluation Reports"]
-    end
-
-    subgraph Providers["Provider Layer: model execution"]
-        Gemini["Gemini API"]
-        OpenAI["OpenAI API"]
-        Claude["Claude API"]
-        Ollama["Ollama / Local Models"]
-    end
-
-    Sources["Raw Session Sources<br/>ChatGPT Export / Codex Session / Claude Code Transcript / OpenCode"] --> Import
-    Import --> Normalize
-    Normalize --> Load
-    Load --> Extract
-    Extract --> Providers
-    Providers --> Extract
-    Extract --> Batch
-    Batch --> Analyze
-    Analyze --> Report
-
-    Codex --> Core
-    ClaudeCode --> Core
-    Cursor --> Core
-    Desktop --> Core
-```
-
-## Core Engine
-
-The Core Engine is the center of the product.
-
-It owns:
-
-- importing session sources
-- normalizing provider-specific data into JSONL
-- loading normalized events
-- rendering evidence-grounded prompts
-- validating structured representation output
-- running batch extraction
-- analyzing batch results
-- generating review and evaluation reports
-
-The Core Engine should remain useful without Codex, Claude Code, Cursor, VS Code, or a desktop app.
-
-Those tools should make the engine easier to invoke, but they should not contain the product logic.
-
-Current implementation status:
-
-- The current engine is mostly Python.
-- Importers, loader, extractor, evaluator, health checks, and batch runner are Python.
-- Node may be useful later for plugin or editor wrappers, but it should not become the core prematurely.
-
-## Extension Layer
-
-The Extension Layer should consist of thin wrappers around the Core Engine.
-
-Examples:
-
-- Codex plugin
-- Claude Code slash commands
-- Cursor extension
-- VS Code extension
-- Desktop app
-
-These extensions should call the Core Engine rather than reimplement it.
-
-Good extension responsibilities:
-
-- pass a session path to the Core Engine
-- invoke import
-- invoke batch representation generation
-- open generated review files
-- display report outputs
-
-Bad extension responsibilities:
-
-- owning representation schema
-- duplicating provider logic
-- implementing separate extractors
-- maintaining separate evaluation behavior
-- introducing provider-specific behavior outside the Core Engine
-
-The desired relationship is:
+The short version:
 
 ```text
-Extension command
-  -> Core CLI
-    -> normalized data / representation / report
+Plugin is the View.
+Watcher is the Health Brain.
+OpenCode DB and logs are evidence sources.
+Recovery remains human-directed.
 ```
 
-This keeps the product independent from any single AI coding tool.
+## Current product shape
 
-## Provider Layer
+AWC is currently an OpenCode Health Companion. It is local-first and installed
+with npm into the current user's OpenCode configuration.
 
-The Provider Layer is responsible for model execution.
+It answers:
 
-Long-term provider candidates:
+- Is the current OpenCode work idle, active, quiet, stuck, failed, or unknown?
+- What evidence caused that label?
+- Is the parent task idle while a child agent is still working?
+- Is a provider/model retry loop preventing progress?
 
-- Gemini API
-- OpenAI API
-- Claude API
-- Ollama / local models
+It is not:
 
-Current implementation status:
+- a hosted monitoring service
+- an LLM provider
+- an automatic recovery agent
+- a general OMO controller
+- a notification system
 
-- Gemini and OpenAI are supported in the current extractor path.
-- Gemini is called through an OpenAI-compatible endpoint.
-- Provider-specific code is still small and should not be over-abstracted yet.
+## Runtime data flow
 
-Important principle:
-
-> Do not over-abstract providers too early.
-
-Provider abstraction should be extracted only when real divergence appears, for example:
-
-- Claude API is actually implemented.
-- Ollama/local model behavior is tested.
-- provider-specific structured output handling becomes meaningfully different.
-- retry, token, or quota handling becomes provider-specific enough to justify a shared interface.
-
-Until then, provider support should remain simple and practical.
-
-## Current Data Flow
-
-```mermaid
-sequenceDiagram
-    participant Source as Raw Session Source
-    participant Importer as Importer
-    participant JSONL as Normalized JSONL
-    participant Loader as Event Loader
-    participant Extractor as Extractor
-    participant Provider as LLM Provider
-    participant Output as Representation JSON
-    participant Review as Human Review
-
-    Source->>Importer: official export or local session
-    Importer->>JSONL: normalized events
-    JSONL->>Loader: load Event[]
-    Loader->>Extractor: events
-    Extractor->>Provider: prompt + evidence
-    Provider-->>Extractor: structured extraction
-    Extractor->>Output: Goal Stack / Current Situation / Blocker / Evidence
-    Output->>Review: review sheet / quality report
+```text
+User
+  ↓
+OpenCode
+  ├─ opencode.db
+  └─ ~/.local/share/opencode/log/*.log
+         ↓
+AWC Watcher
+  ├─ session lifecycle evidence
+  ├─ tool evidence
+  ├─ provider retry evidence
+  └─ direct parent/child aggregation
+         ↓
+Health JSON
+         ↓
+OpenCode Plugin
+         ↓
+Sidebar / Compact Indicator
 ```
 
-## Current Phase: Phase 0.5
+## Runtime components
 
-The project is currently in **Phase 0.5: Human Evaluation support**.
+### CLI
 
-The priority is not feature expansion.
+Files:
 
-The priority is to answer:
+```text
+bin/awc.js
+npm/cli/main.js
+npm/cli/install.js
+npm/cli/doctor.js
+npm/cli/paths.js
+npm/cli/files.js
+```
 
-> Does the current representation help humans understand real AI sessions quickly?
+Responsibilities:
 
-Current priorities:
+- install AWC-managed files
+- preserve existing OpenCode settings
+- install runtime dependencies under the AWC runtime directory
+- validate installation with `awc doctor`
+- uninstall only AWC-managed files
 
-- batch representation generation on real imported sessions
-- success/failure measurement
-- empty or malformed field inspection
-- representation length analysis
-- evidence volume analysis
-- suspicious sample detection
-- Human Evaluation candidate selection
-- review sheet generation
+The CLI copies runtime files from the npm package into user-level XDG paths.
 
-Non-priorities in Phase 0.5:
+Common edit points:
 
-- dashboard
-- desktop app
-- plugin packaging
-- new health detectors
-- Session Supervision behavior
-- large provider refactor
-- premature provider framework
+| Task | Files |
+|---|---|
+| Change install/uninstall behavior | `npm/cli/install.js`, `npm/test/install.test.js` |
+| Change doctor checks | `npm/cli/doctor.js`, `npm/test/doctor.test.js` |
+| Change path resolution | `npm/cli/paths.js` |
 
-## Why Provider Refactoring Is Not Next
+### Plugin View
 
-Provider refactoring is tempting because the project clearly has a future Provider Layer.
+File:
 
-However, it is not the next highest-leverage task.
+```text
+integrations/opencode/.opencode/plugins/agent-companion.js
+```
 
-The immediate risk is not that provider code is too messy. The immediate risk is that the representation has not yet been sufficiently validated on real data.
+Responsibilities:
 
-Before investing in provider architecture, the project needs better answers to:
+- call the watcher approximately every five seconds
+- keep polling alive independent of OpenCode render/event activity
+- update mounted OpenTUI text nodes directly
+- display:
+  - `Overall`
+  - `Parent`
+  - `Children`
+  - child detail rows, up to five
+  - `Reason`
+  - `Tool`
+  - `Last Check`
 
-- Does Goal Stack help across many real sessions?
-- Does Current Situation reduce time-to-understanding?
-- Is Blocker reliable or too broad?
-- Are Evidence IDs sufficient for human verification?
-- Which session types produce weak representations?
-- How often does the schema produce too much output?
+The compact indicator shows Overall Health only.
 
-Therefore, the next code task should not be Provider refactoring.
+The plugin does not own Health policy. It renders watcher output.
 
-## Next Recommended Code Task
+Common edit points:
 
-The next code task should be:
+| Task | Files |
+|---|---|
+| Change sidebar or compact display | `integrations/opencode/.opencode/plugins/agent-companion.js` |
+| Change polling/stale UI behavior | `npm/test/health-refresh.test.js` |
+| Update user-facing display examples | `README.md`, `CHANGELOG.md` |
 
-> Batch Result Analysis Report CLI
+### DB Health Watcher
 
-This CLI should analyze a folder of generated representation JSON files and produce a quality report.
+File:
 
-It should summarize:
+```text
+integrations/opencode/adapter/db_health_watcher.ts
+```
 
-- total input sessions
-- representation success/failure count
-- skipped count
-- empty Goal Stack count
-- empty Current Situation count
-- empty Blocker count
-- blocker status distribution
-- goal shift distribution
-- evidence count distribution
-- representation length statistics
-- suspicious samples
-- recommended Human Evaluation candidates
+Responsibilities:
 
-This supports Phase 0.5 directly without changing:
+- read OpenCode SQLite session and part rows
+- evaluate latest session lifecycle activity
+- evaluate latest tool state
+- combine provider retry evidence
+- climb from selected child to root parent when needed
+- query direct child sessions via `session.parent_id`
+- compute Overall Health from parent and included children
+- emit stable Health JSON
 
-- Importer
-- Extractor prompt
-- Representation schema
-- Evaluator
-- Provider behavior
+The watcher is the current production runtime. It is TypeScript executed by
+Node.js 24+.
 
-## Strategic Summary
+Common edit points:
 
-The project should stay centered on the Core Engine.
+| Task | Files |
+|---|---|
+| Change Health policy | `integrations/opencode/adapter/db_health_watcher.ts` |
+| Add watcher regression coverage | `npm/test/health-watcher.test.js` |
+| Update documented Health rules | `docs/HEALTH_MODEL.md`, `CHANGELOG.md` |
 
-The Core Engine should produce evidence-grounded representations from AI sessions.
+### Provider Retry Parser
 
-Extensions should remain thin wrappers.
+File:
 
-Providers should be replaceable, but not over-abstracted before real needs appear.
+```text
+integrations/opencode/adapter/provider_retry_parser.js
+```
 
-Phase 0.5 should focus on Human Evaluation and batch quality analysis.
+Responsibilities:
 
-The next implementation priority is not more providers, not a dashboard, and not supervision. It is a report CLI that helps evaluate whether the current representation is actually useful.
+- scan OpenCode logs for provider/model retry metadata
+- extract non-sensitive fields such as provider, model, session ID, status code,
+  retry delay, and retry sequence
+- maintain a cursor so polling does not reread the whole log
+- ignore retry evidence from other sessions
+- allow newer DB activity to clear stale retry evidence
 
+The parser does not output prompts, responses, tool output, or file contents.
+
+Common edit points:
+
+| Task | Files |
+|---|---|
+| Change retry parsing | `integrations/opencode/adapter/provider_retry_parser.js` |
+| Add parser fixtures | `npm/test/provider-retry-fixtures/*.txt` |
+| Add parser regression coverage | `npm/test/provider-retry-parser.test.js` |
+
+## Source map
+
+Current runtime files:
+
+```text
+bin/awc.js
+npm/cli/main.js
+npm/cli/install.js
+npm/cli/doctor.js
+npm/cli/files.js
+npm/cli/paths.js
+integrations/opencode/adapter/db_health_watcher.ts
+integrations/opencode/adapter/provider_retry_parser.js
+integrations/opencode/.opencode/plugins/agent-companion.js
+```
+
+Current test files:
+
+```text
+npm/test/health-watcher.test.js
+npm/test/provider-retry-parser.test.js
+npm/test/provider-retry-fixtures/*.txt
+npm/test/health-refresh.test.js
+npm/test/install.test.js
+npm/test/doctor.test.js
+npm/test/main.test.js
+npm/test/opentui-node.integration.test.js
+```
+
+The OpenTUI node integration test may be skipped by Node when the local runtime
+lacks FFI support. It is still useful when Bun/OpenTUI support is available.
+
+## Health JSON shape
+
+The watcher keeps backward-compatible top-level fields:
+
+```text
+health
+reason
+checked_at
+session
+tool
+activity
+provider_retry
+thresholds
+wal
+```
+
+0.2.5 adds optional Parent/Child fields:
+
+```text
+overall
+parent
+children_summary
+children
+```
+
+Top-level `health` is Overall Health.
+
+## Parent/Child model
+
+OpenCode stores direct child sessions with:
+
+```text
+session.parent_id = parent session id
+```
+
+AWC v1 only uses direct children:
+
+```text
+Parent
+├─ Child A
+├─ Child B
+└─ Child C
+```
+
+Nested child UI is intentionally deferred.
+
+If the selected watcher session is itself a child, the watcher climbs to the
+root parent and then evaluates that parent plus its direct children.
+
+## Evidence order
+
+The watcher considers evidence in this broad order:
+
+```text
+watcher freshness
+provider retry
+newer step error
+running tool
+unfinished step
+newer session activity
+completed tool
+no activity
+```
+
+Within Overall aggregation:
+
+```text
+Failed → Stuck → Active → Quiet → Unknown → Idle
+```
+
+See [Health Model](HEALTH_MODEL.md) for the detailed rules.
+
+## Current installed paths
+
+Default paths:
+
+```text
+~/.local/share/awc/
+  adapter/db_health_watcher.ts
+  adapter/provider_retry_parser.js
+  opencode/agent-companion.js
+
+~/.config/opencode/
+  tui-plugins/awc.js
+  plugins/awc.js
+  tui.json
+```
+
+These paths can vary through `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and
+`AWC_RUNTIME_DIR`.
+
+## Design boundaries
+
+AWC does not currently implement:
+
+- selected TUI session routing with full reliability
+- recursive/nested child UI
+- OMO-specific aggregation
+- natural-language assistant text analysis
+- notifications
+- automatic recovery
+- new Health enum values beyond `idle`, `active`, `quiet`, `stuck`, `failed`,
+  and `unknown`
+
+## Maintainer rules
+
+- Keep Health policy in the watcher, not in the plugin view.
+- Keep provider retry parsing metadata-only.
+- Do not infer Health from assistant natural language as the primary signal.
+- Do not let old child sessions pollute current Overall Health.
+- Preserve `awc install`, `awc doctor`, and `awc uninstall` behavior.
+- Re-run the release checks before publishing:
+
+  ```bash
+  npm test
+  node --check integrations/opencode/adapter/db_health_watcher.ts
+  node --check integrations/opencode/adapter/provider_retry_parser.js
+  node --check integrations/opencode/.opencode/plugins/agent-companion.js
+  git diff --check
+  npm pack --dry-run
+  ```
+
+- When UI behavior changes, install a local tarball, run `awc doctor`, restart
+  OpenCode, and manually verify the screen behavior.

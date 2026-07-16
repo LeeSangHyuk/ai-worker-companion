@@ -1,7 +1,0 @@
-{"type":"user_message","content":"테스트가 멈춘 이유를 확인해줘."}
-{"type":"tool_call","content":"exec: npm test -- --runInBand"}
-{"type":"tool_result","content":"No output was produced."}
-{"type":"tool_call","content":"exec: npm test -- --runInBand"}
-{"type":"tool_result","content":"No output was produced."}
-{"type":"tool_call","content":"exec: npm test -- --runInBand"}
-{"type":"tool_result","content":"No output was produced."}

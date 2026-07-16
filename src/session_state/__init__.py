@@ -1,2 +1,0 @@
-"""Codex session state extractor."""
-

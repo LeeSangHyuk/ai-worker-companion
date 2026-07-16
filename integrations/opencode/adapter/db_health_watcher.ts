@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-/** Node/TypeScript parity PoC for db_health_watcher.py. */
+/** OpenCode DB/log Health watcher for AWC. */
 
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
@@ -193,7 +193,7 @@ function collectActivity(rows: Array<Omit<PartRow, "data"> & { data: string }>):
         && activity.latestStepFinish
       ) break;
     } catch {
-      // Match the Python watcher: malformed part JSON is skipped.
+      // Malformed part JSON should not stop Health evaluation.
     }
   }
   return activity;

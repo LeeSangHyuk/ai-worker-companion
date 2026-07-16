@@ -1,256 +1,198 @@
 # AI Worker Companion
 
-AI workers shouldn't fail silently.
+AI workers should not fail silently.
 
-> **Early Preview:** AWC is an experimental local companion, not a production
-> monitoring or supervision system. Health labels are best-effort interpretations
-> of the latest OpenCode session/tool state and can be `Unknown` when the available
-> state is incomplete or stale.
+> **Early Preview:** AWC is an experimental local companion for OpenCode. Health
+> labels are best-effort interpretations of local OpenCode DB and log evidence.
+> They are meant to improve visibility, not to replace human judgment.
 
-AI Worker Companion is an agent-agnostic layer for understanding, monitoring, and recovering long-running AI agent sessions. It turns session state into a readable status, calls attention to possible blockers, and prepares a human-approved handoff prompt when work needs to continue elsewhere.
+AI Worker Companion shows whether an OpenCode task appears idle, active, quiet,
+stuck, failed, or unknown. It also explains the evidence behind the label so a
+human can decide whether to wait, inspect logs, or intervene.
 
-```text
-AI Agent Session
-  -> Session State
-  -> Companion Status
-  -> Human Attention
-  -> Recovery Handoff
-```
+## Why AWC
 
-## What this is
-
-This project is an MVP PoC for an AI Worker Companion.
-
-It helps a human answer:
-
-- What is the AI agent currently trying to do?
-- What is the current situation?
-- Is anything blocking progress?
-- What evidence supports that state?
-- How can I resume or hand off this session without rereading the whole log?
-
-The current implementation is local-first and agent-agnostic. OpenCode is the first integration experiment, not the product boundary.
-
-## What this is not
-
-This is not:
-
-- an AI IDE
-- an LLM provider or hosted model service
-- a full observability platform
-- an OpenCode-only tool
-- a production-ready supervision system
-- an automatic recovery agent
-
-Recovery is handoff-only. Nothing starts a new session automatically.
-
-## What works today
-
-- Read existing session representation JSON.
-- Print session state from a CLI.
-- Print a recovery/handoff prompt from a CLI.
-- Open a static Companion mock in the browser.
-- Use notification/recovery/state seams inside the Companion mock.
-- Inspect an OpenCode integration PoC skeleton.
-
-Current product path:
+AI coding agents can look busy while they are actually blocked, retrying a
+provider call, waiting in a child task, or already finished. AWC makes that
+hidden work state visible. It reads local OpenCode evidence, summarizes Health,
+and shows why the status was chosen. The current product focuses on OpenCode
+tasks, provider/model retry, and parent/child agent visibility. Long term, AWC
+is intended to become a practical control-room layer for AI work: not an
+automatic recovery agent, but a clear signal that helps humans decide when to
+wait, inspect, or step in.
 
 ```text
-Core Engine
-  -> Agent Adapter
-  -> Companion
-  -> Notification
-  -> Recovery
+OpenCode DB + OpenCode logs
+  -> AWC Health Watcher
+  -> Health JSON
+  -> OpenCode TUI plugin
+  -> Sidebar / compact indicator
 ```
 
-## Quick Start
+## What works in 0.2.5
 
-### OpenCode Companion (npm package)
+- Local npm CLI: `awc install`, `awc doctor`, `awc uninstall`.
+- OpenCode TUI Health surface with `Overall`, `Parent`, `Children`, `Reason`,
+  `Tool`, and `Last Check`.
+- Polling that continues independently from OpenCode render/event activity.
+- Mounted OpenTUI text nodes update in place, so the screen reflects each check.
+- Stale watcher data becomes `Unknown` instead of preserving an old result.
+- Session lifecycle-aware Health:
+  - newer `step-finish reason=error` can become `Failed`
+  - unfinished steps become `Active`, `Quiet`, or `Stuck`
+  - newer session activity is not hidden by an older completed tool
+- Provider/model retry detection from local OpenCode logs:
+  - short same-session retry sequences become `Quiet`
+  - repeated or long-running same-session retries become `Stuck`
+  - newer same-session DB activity clears retry evidence
+- Parent/Child Health Visibility v1:
+  - top-level Health is `Overall`
+  - parent Health is shown separately
+  - direct child sessions are evaluated individually
+  - old child sessions are excluded so stale failures do not pollute current work
+  - compact indicator shows Overall only
 
-Requires Node.js 24 or newer. Install AWC into
-your user-level OpenCode configuration with:
+## Install
+
+Requires Node.js 24 or newer.
 
 ```bash
-npx ai-worker-companion install
-npx ai-worker-companion doctor
+npx ai-worker-companion@latest install
+npx ai-worker-companion@latest doctor
 ```
 
-The installer preserves existing OpenCode plugins, including
-`oh-my-openagent`, and installs the Health Detector and TUI view into the
-current user's XDG configuration and data directories. To remove only files
-and settings managed by AWC:
+The installer writes only AWC-managed files under the current user's XDG
+configuration and data directories. It preserves existing OpenCode settings and
+plugins.
+
+To remove AWC-managed files:
 
 ```bash
-npx ai-worker-companion uninstall
+npx ai-worker-companion@latest uninstall
 ```
 
-Current detection limits:
+## What you should see
 
-- The compact indicator appears on a selected OpenCode session, not the home screen.
-- A direct TUI shell command may be reported as `Unknown` when OpenCode records no exit code.
-- Provider/model retry loops are not currently detected as a separate Health state.
-- OMO subagent lifecycle and stuck detection are not part of the supported Health model.
-- AWC observes the latest OpenCode session/tool records; it does not provide an agent heartbeat or prove that a long-running operation is making progress.
-- When watcher data cannot be refreshed, AWC changes the displayed Health to `Unknown` after the stale threshold instead of treating the previous result as current.
-- The Python Health Detector remains in the repository as a reference implementation; the npm runtime uses TypeScript.
+After install, restart OpenCode:
 
-### Repository development
-
-#### 1. Install locally
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e .
+```bash
+opencode .
 ```
 
-#### 2. Print session state
-
-Use the public sanitized example:
-
-```powershell
-python session_state.py `
-  --input examples/session.state.example.json `
-  --format markdown
-```
-
-Or read a local folder of generated representations if you have created one:
-
-```powershell
-python session_state.py `
-  --input outputs/representations_full_124_gemini_3_1_flash_lite `
-  --select recent `
-  --format markdown
-```
-
-#### 3. Generate a handoff prompt
-
-```powershell
-python session_state.py `
-  --input examples/session.state.example.json `
-  --resume
-```
-
-The handoff prompt is printed to stdout. It is meant to be copied by a human into another agent session.
-
-#### 4. Open the Companion mock
-
-Open this file in a browser:
+In the sidebar, AWC displays:
 
 ```text
-companion/index.html
+Overall: Active
+Parent: Idle
+Children: 1 active, 1 failed
+- explore: Active
+- test-agent: Failed
+Reason: Child test-agent is failed: ...
+Tool: bash · completed · exit 1
+Last Check: 9:41:05 PM
 ```
 
-The mock demonstrates the intended UX:
+If there are no direct child sessions:
 
 ```text
-quiet status -> attention -> recovery handoff
+Overall: Idle
+Parent: Idle
+Children: none
 ```
 
-#### 5. Inspect the OpenCode PoC
+## Health states
 
-OpenCode is the first integration target.
+| Health | Meaning | Typical action |
+|---|---|---|
+| `Idle` | No active evidence; work appears complete or inactive. | Usually wait or start next task. |
+| `Active` | A tool, step, or child session is currently active. | Wait. |
+| `Quiet` | Activity/retry is ongoing but has been quiet for a while. | Watch briefly. |
+| `Stuck` | Running work or provider retry has exceeded the stuck threshold. | Inspect and consider intervention. |
+| `Failed` | A structural failure was observed, such as a failed tool or error step. | Inspect evidence. |
+| `Unknown` | AWC cannot make a reliable judgment, or watcher data is stale. | Check AWC/OpenCode state. |
+
+AWC does not use assistant natural-language claims like “I am working” as the
+primary signal. Health is based on structured local evidence.
+
+## Known limitations
+
+- Selected TUI session routing is still limited; the watcher currently follows
+  its selected/latest session policy rather than a fully reliable TUI-selected
+  session signal.
+- Only direct child sessions are surfaced; recursive/nested child UI is not
+  included.
+- OMO-specific active agent/job board integration is not included.
+- Desktop/mobile notifications are not included.
+- Natural-language assistant text analysis is not included.
+- A direct TUI shell command may remain `Unknown` if OpenCode records no exit
+  code.
+- AWC is local visibility tooling, not proof that an external provider is making
+  progress.
+
+## Repository map
+
+Current npm runtime:
 
 ```text
-integrations/opencode/
+bin/awc.js
+npm/cli/
+integrations/opencode/adapter/db_health_watcher.ts
+integrations/opencode/adapter/provider_retry_parser.js
+integrations/opencode/.opencode/plugins/agent-companion.js
 ```
 
-Important files:
-
-- `integrations/opencode/adapter/session_state_adapter.py`
-- `integrations/opencode/.opencode/commands/companion-state.md`
-- `integrations/opencode/.opencode/commands/companion-handoff.md`
-- `integrations/opencode/.opencode/plugins/agent-companion.js`
-
-The current OpenCode PoC focuses on proving the adapter path:
+Tests:
 
 ```text
-OpenCode
-  -> Adapter
-  -> session_state.py
-  -> Companion state / handoff output
+npm/test/
 ```
 
-## Repository Structure
+Docs:
 
 ```text
-src/session_state/
-  Core engine modules:
-  schema, extractor, prompt, importers, health checks
-
-session_state.py
-  Agent-facing CLI for state and handoff output
-
-companion/
-  Static AI Worker Companion mock
-  state / notification / recovery seams
-
-integrations/
-  Agent adapter experiments
-  currently: OpenCode PoC
-
-scripts/
-  Import, evaluation, viewer, and validation utilities
-
-tests/
-  CLI, importer, and ingestion tests
-
-samples/
-  Small sample sessions and health detector fixtures
-
-raw_data/
-  Research fixtures and validation samples
-
-outputs/
-reports/
-reviews/
-viewer/
-  Generated validation and prototype artifacts
-
-docs/
-  Architecture, validation, platform fit, and product direction notes
+docs/ARCHITECTURE.md
+docs/HEALTH_MODEL.md
 ```
 
-## Privacy and Local-First Principles
+## Development
 
-- No hosted LLM is provided by this project.
-- No automatic cloud upload is performed by the Companion or CLI.
-- `session_state.py` reads local representation JSON.
-- Recovery does not automatically start a new agent session.
-- Handoff is human-approved and copy/paste based.
-- Generated outputs may contain sensitive session content; review before publishing.
+Run the current JavaScript test suite:
 
-Some extractor and batch workflows can call external model APIs when explicitly configured. The Companion, Core CLI state rendering, and OpenCode adapter path do not require a new hosted service.
+```bash
+npm test
+```
 
-## Project Status
+Run syntax and packaging checks before a release:
 
-Prototype / MVP PoC.
+```bash
+node --check integrations/opencode/adapter/db_health_watcher.ts
+node --check integrations/opencode/adapter/provider_retry_parser.js
+node --check integrations/opencode/.opencode/plugins/agent-companion.js
+git diff --check
+```
 
-Validated so far:
+Check package contents:
 
-- Session representation structure
-- CLI session state rendering
-- Recovery handoff prompt generation
-- Static Companion UX mock
-- OpenCode adapter direction
+```bash
+npm pack --dry-run
+```
 
-Not production-ready:
+The package should contain only runtime files, README, LICENSE, and
+`package.json`.
 
-- persistent agent UI integration
-- automatic supervision
-- production notification routing
-- multi-agent platform support
-- privacy hardening for public datasets
+When UI behavior changes, also install a local tarball, run `awc doctor`,
+restart OpenCode, and verify `Last Check`, Active/Idle transitions, and any
+changed Health evidence manually.
 
-## Key Docs
+## Privacy and local-first principles
+
+- AWC reads local OpenCode DB and log files.
+- AWC does not upload session content.
+- Provider retry parsing extracts only retry metadata.
+- Prompt, response, tool output, and file contents are not emitted as telemetry.
+- Recovery remains human-directed; AWC does not start a new agent session.
+
+## Key docs
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Project Vision](docs/PROJECT_VISION.md)
-- [Repository Review](docs/REPOSITORY_REVIEW.md)
-- [Companion Platform Fit](docs/COMPANION_PLATFORM_FIT.md)
-- [OpenCode PoC](docs/OPENCODE_POC.md)
-- [Plugin PoC](docs/PLUGIN_POC.md)
-
-## Product Definition
-
-AI Worker Companion helps humans understand, monitor, and recover long-running AI agent sessions without rereading the raw log.
+- [Health Model](docs/HEALTH_MODEL.md)

@@ -34,6 +34,7 @@ desktop.ini
 .agents/
 .agent-handoff/
 .codex/
+.omo/
 
 # Secrets and local environment files
 .env
@@ -56,6 +57,8 @@ evaluation_*.txt
 
 # Generated static pages and local reports
 *.generated.html
+/project_overview*.html
+*.tgz
 *.tmp
 *.temp
 *.log
