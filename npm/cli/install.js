@@ -32,12 +32,13 @@ function maybeFail(env, stage) {
 export async function install(paths, { env = process.env, skipDependencies = false } = {}) {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor < 24) throw new Error(`Node.js 24 or newer is required (current: ${process.version})`);
-  const mutable = [paths.tuiConfig, paths.tuiEntry, paths.pluginEntry, paths.manifest, paths.watcher, paths.plugin, paths.runtimePackage];
+  const mutable = [paths.tuiConfig, paths.tuiEntry, paths.pluginEntry, paths.manifest, paths.watcher, paths.retryParser, paths.plugin, paths.runtimePackage];
   const before = await snapshot(mutable);
   try {
     await mkdir(dirname(paths.watcher), { recursive: true });
     await mkdir(dirname(paths.plugin), { recursive: true });
     await copyFile(join(packageRoot, "integrations/opencode/adapter/db_health_watcher.ts"), paths.watcher);
+    await copyFile(join(packageRoot, "integrations/opencode/adapter/provider_retry_parser.js"), paths.retryParser);
     await copyFile(join(packageRoot, "integrations/opencode/.opencode/plugins/agent-companion.js"), paths.plugin);
     maybeFail(env, "runtime");
 
@@ -70,7 +71,7 @@ export async function install(paths, { env = process.env, skipDependencies = fal
       installedAt: new Date().toISOString(),
       runtimeDir: paths.runtimeDir,
       tuiEntry: TUI_ENTRY,
-      files: [paths.watcher, paths.plugin, paths.tuiEntry, paths.pluginEntry],
+      files: [paths.watcher, paths.retryParser, paths.plugin, paths.tuiEntry, paths.pluginEntry],
     });
     return { changed: true, runtimeDir: paths.runtimeDir };
   } catch (error) {

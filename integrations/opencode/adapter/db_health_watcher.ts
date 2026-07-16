@@ -6,6 +6,11 @@ import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import {
+  publicSummary,
+  readProviderRetryState,
+  selectActiveRetryForSession,
+} from "./provider_retry_parser.js";
 
 type Health = "active" | "quiet" | "stuck" | "failed" | "idle" | "unknown";
 
@@ -17,6 +22,9 @@ type Options = {
   stuckThreshold: number;
   once: boolean;
   nowMs?: number;
+  retryLogDir?: string;
+  retryCursor?: string;
+  disableProviderRetry: boolean;
 };
 
 type SessionRow = {
@@ -73,8 +81,11 @@ function parseArgs(argv: string[]): Options {
     quietThreshold: numberValue("--quiet-threshold", 60),
     stuckThreshold: numberValue("--stuck-threshold", 180),
     once,
+    disableProviderRetry: values.get("--provider-retry") === "off",
   };
   if (values.has("--now-ms")) result.nowMs = numberValue("--now-ms", Date.now());
+  if (values.has("--retry-log-dir")) result.retryLogDir = resolve(values.get("--retry-log-dir")!);
+  if (values.has("--retry-cursor")) result.retryCursor = resolve(values.get("--retry-cursor")!);
   if (result.pollInterval <= 0) throw new Error("--poll-interval must be > 0");
   if (result.quietThreshold < 0) throw new Error("--quiet-threshold must be >= 0");
   if (result.stuckThreshold < result.quietThreshold) {
@@ -195,10 +206,11 @@ function result(params: {
   session?: SessionRow | null;
   tool?: PartRow | null;
   activity?: SessionActivity | null;
+  providerRetry?: Record<string, unknown> | null;
   lastActivitySeconds?: number | null;
   toolElapsed?: number | null;
 }) {
-  const { health, reason, options, refreshReason, checkedAt, session = null, tool = null, activity = null } = params;
+  const { health, reason, options, refreshReason, checkedAt, session = null, tool = null, activity = null, providerRetry = null } = params;
   const wal = walState(options.db);
   const seconds = (value: unknown) => value == null ? null : Math.trunc(Number(value) / 1000);
   const latestPart = activity ? latestActivityPart(activity) : null;
@@ -234,9 +246,30 @@ function result(params: {
       latest_step_start_at: seconds(activity?.latestStepStart?.time_updated),
       latest_step_finish_at: seconds(activity?.latestStepFinish?.time_updated),
     },
+    provider_retry: providerRetry ?? { active: false },
     thresholds: { quiet_seconds: options.quietThreshold, stuck_seconds: options.stuckThreshold },
     wal: { path: wal.path, exists: wal.exists, size_bytes: wal.size_bytes, mtime: wal.mtime },
   };
+}
+
+function providerRetryEvidence(options: Options, session: SessionRow, activity: SessionActivity, nowMs: number) {
+  if (options.disableProviderRetry) return null;
+  const retryState = readProviderRetryState({
+    ...(options.retryLogDir ? { logDir: options.retryLogDir } : {}),
+    ...(options.retryCursor ? { cursorPath: options.retryCursor } : {}),
+    nowMs,
+    ttlSeconds: 300,
+  });
+  if (!retryState.ok) return null;
+  const latestPart = latestActivityPart(activity);
+  const activeRetry = selectActiveRetryForSession(retryState.summaries, {
+    sessionId: session.id,
+    latestActivityMs: latestPart?.time_updated ?? null,
+    nowMs,
+    ttlSeconds: 300,
+    stuckThresholdSeconds: options.stuckThreshold,
+  });
+  return activeRetry;
 }
 
 function assess(options: Options, refreshReason: string) {
@@ -256,6 +289,16 @@ function assess(options: Options, refreshReason: string) {
     const latestPart = latestActivityPart(activity);
     const latestActivitySeconds = latestPart ? activityElapsedSeconds(latestPart, nowMs) : null;
     const activityDetails = { ...base, session, tool, activity, lastActivitySeconds: latestActivitySeconds };
+
+    const providerRetry = providerRetryEvidence(options, session, activity, nowMs);
+    if (providerRetry) {
+      return result({
+        ...activityDetails,
+        health: providerRetry.health,
+        reason: providerRetry.reason,
+        providerRetry: publicSummary(providerRetry),
+      });
+    }
 
     const latestStepFinish = activity.latestStepFinish;
     const latestStepReason = stepReason(latestStepFinish);

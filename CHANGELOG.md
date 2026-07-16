@@ -1,6 +1,36 @@
 # Changelog
 
-## 0.2.3 - Unreleased
+## 0.2.4 - Unreleased
+
+### Changed
+
+- Detect same-session OpenCode provider/model retry evidence from local OpenCode logs.
+- Map active same-session provider retries to `quiet` for short retry sequences and `stuck`
+  for repeated or long-running retry sequences.
+- Clear retry evidence when newer same-session DB activity appears, preventing stale provider
+  retries from overriding current Health.
+- Add a cursor-backed OpenCode log reader so retry detection does not reread full log files
+  every polling cycle.
+- Add non-sensitive `provider_retry` metadata to watcher output.
+
+### Validation
+
+- Added fixtures for same-session retries, repeated retries, other-session retries, missing
+  session IDs, stale retry TTL, retry clearing after newer DB activity, malformed logs, cursor
+  recovery, truncation, rotation, and sensitive field redaction.
+
+### Deferred
+
+- Parent/Child agent Health visibility, Overall Health aggregation, OMO integration, selected
+  TUI session routing, natural-language assistant text analysis, notification features, and
+  final 401/403 auth/config error policy remain out of scope.
+
+### Next milestone candidate
+
+- Parent/Child agent health visibility:
+  `Overall: Active`, `Parent: Idle`, `Children: 2 active, 1 failed`.
+
+## 0.2.3
 
 ### Changed
 

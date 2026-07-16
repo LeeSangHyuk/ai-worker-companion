@@ -1,6 +1,6 @@
 {
   "name": "ai-worker-companion",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Health companion for OpenCode sessions",
   "keywords": [
     "opencode",
@@ -35,6 +35,7 @@
     "bin/",
     "npm/cli/",
     "integrations/opencode/adapter/db_health_watcher.ts",
+    "integrations/opencode/adapter/provider_retry_parser.js",
     "integrations/opencode/.opencode/plugins/agent-companion.js"
   ],
   "license": "MIT"

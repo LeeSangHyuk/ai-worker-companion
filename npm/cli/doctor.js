@@ -23,6 +23,9 @@ export async function doctor(paths, { env = process.env } = {}) {
   checks.push({ name: "Health watcher", ok: await readable(paths.watcher), detail: paths.watcher });
   const watcherSyntax = spawnSync(process.execPath, ["--check", paths.watcher], { env, encoding: "utf8" });
   checks.push({ name: "Health watcher syntax", ok: watcherSyntax.status === 0, detail: watcherSyntax.status === 0 ? "valid" : (watcherSyntax.stderr || "invalid").trim() });
+  checks.push({ name: "Provider retry parser", ok: await readable(paths.retryParser), detail: paths.retryParser });
+  const retryParserSyntax = spawnSync(process.execPath, ["--check", paths.retryParser], { env, encoding: "utf8" });
+  checks.push({ name: "Provider retry parser syntax", ok: retryParserSyntax.status === 0, detail: retryParserSyntax.status === 0 ? "valid" : (retryParserSyntax.stderr || "invalid").trim() });
   checks.push({ name: "TUI entrypoint", ok: await readable(paths.tuiEntry), detail: paths.tuiEntry });
   checks.push({ name: "Plugin entrypoint", ok: await readable(paths.pluginEntry), detail: paths.pluginEntry });
   const tui = await parseJsonFile(paths.tuiConfig, { plugin: [] });

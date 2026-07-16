@@ -18,6 +18,8 @@ export function resolvePaths(env = process.env) {
     pluginEntry: join(openCodeConfig, "plugins", "awc.js"),
     manifest: join(runtimeDir, "manifest.json"),
     watcher: join(runtimeDir, "adapter", "db_health_watcher.ts"),
+    retryParser: join(runtimeDir, "adapter", "provider_retry_parser.js"),
+    retryCursor: join(runtimeDir, "provider-retry-cursor.json"),
     plugin: join(runtimeDir, "opencode", "agent-companion.js"),
     runtimePackage: join(runtimeDir, "package.json"),
     database: resolve(env.OPENCODE_DB || join(dataHome, "opencode", "opencode.db")),

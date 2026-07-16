@@ -1,0 +1,1 @@
+ERROR 2026-07-13T21:44:00 +100ms service=llm providerID=anthropic modelID=claude-sonnet-4 session.id=ses_current error={"statusCode":503,"isRetryable":true,"data":{"error":{"code":503,"status":"UNAVAILABLE"}}} stream error
