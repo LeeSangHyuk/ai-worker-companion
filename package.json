@@ -1,6 +1,6 @@
 {
   "name": "ai-worker-companion",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Health companion for OpenCode sessions",
   "keywords": [
     "opencode",

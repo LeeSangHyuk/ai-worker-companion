@@ -1,6 +1,72 @@
 # Changelog
 
-## 0.2.5 - Unreleased
+## 0.2.6
+
+### Added
+
+- Add experimental OpenCode Desktop background support through the standard
+  OpenCode plugin lifecycle.
+- Add opt-in native macOS desktop notifications for Health transitions.
+- Add notification modes:
+  - `off`
+  - `problems-only`
+  - `all`
+- Reuse the notification runtime across Desktop and TUI plugin contexts while
+  keeping TUI rendering notification-free.
+
+### Changed
+
+- Share notification transition selection and watcher refresh behavior across
+  Desktop/no-TUI and TUI environments.
+- Manage notification polling ownership with an AWC-managed global lock file to
+  prevent duplicate polling when OpenCode Desktop loads the plugin in multiple
+  contexts.
+- Improve notification runtime lifecycle handling so restart, disposal, and
+  duplicate-controller cases are handled predictably.
+- Improve executable resolution for npm/OpenCode commands, including Windows
+  command shim handling.
+- Log non-sensitive notification selection decisions through OpenCode app logs
+  for Desktop verification.
+
+### Fixed
+
+- Avoid duplicate notifications from multiple OpenCode Desktop plugin contexts.
+- Avoid notification runtime restart conflicts when plugin contexts reload.
+- Avoid Desktop polling ownership conflicts by allowing only one notification
+  owner at a time.
+- Preserve Health polling when notification delivery fails.
+- Improve provider retry notification selection so retry-driven `Stuck` evidence
+  can notify in problem-focused modes.
+- Fix Windows executable resolution cases where `.cmd` command shims should be
+  invoked without enabling `shell: true` globally.
+
+### Validation
+
+- Verified macOS OpenCode Desktop `1.18.4` loads the global AWC plugin from the
+  user OpenCode plugin directory.
+- Verified Desktop and TUI processes use the same local OpenCode DB evidence.
+- Verified Desktop fixture polling produces a single watcher stream and selects
+  one completion notification on an `Active` to `Idle` transition.
+- Verified direct notifier execution calls macOS `osascript` with sanitized
+  notification text.
+- Verified notification mode behavior, legacy `AWC_NOTIFICATION_ENABLED=1`
+  compatibility, notifier failure isolation, lock ownership, stale lock recovery,
+  and Windows command resolution with automated tests.
+
+### Known limitations
+
+- Desktop monitors the selected/latest session tree only; aggregate monitoring
+  across multiple concurrent sessions is not yet supported.
+- OpenCode Desktop `1.18.4` does not expose a plugin UI API for Sidebar, Panel,
+  View, WebView, Status bar, or Toolbar surfaces.
+- AWC Sidebar and Compact Indicator are available only in the OpenCode TUI.
+- Desktop support is background-only and notification-focused.
+- Native notifications are currently macOS-focused and opt-in.
+- Windows/Linux native notifications, notification history, mobile push,
+  selected TUI session routing, and OMO-specific integration remain out of
+  scope.
+
+## 0.2.5
 
 ### Changed
 

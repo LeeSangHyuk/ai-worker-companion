@@ -1,5 +1,6 @@
 import { resolvePaths } from "./paths.js";
-import { doctor } from "./doctor.js";
+import { formatVersion } from "./paths.js";
+import { doctorReport, formatDoctorReport } from "./doctor.js";
 import { install, uninstall } from "./install.js";
 
 function usage() {
@@ -9,9 +10,11 @@ Commands:
   install       Install AWC for the current user
   uninstall     Remove only AWC-managed files and settings
   doctor        Check the AWC and OpenCode installation
+  version       Print the AWC version
 
 Options:
   --skip-deps   Skip dependency installation (install only)
+  -v, --version Print the AWC version
   -h, --help    Show this help`);
 }
 
@@ -19,6 +22,15 @@ export async function main(argv, { env = process.env } = {}) {
   const [command, ...flags] = argv;
   if (!command || command === "help" || command === "--help" || command === "-h") {
     usage();
+    return 0;
+  }
+  if (command === "version" || command === "--version" || command === "-v") {
+    if (flags.length > 0) {
+      console.error(`Unknown option: ${flags[0]}`);
+      usage();
+      return 2;
+    }
+    console.log(formatVersion());
     return 0;
   }
   const allowedFlags = command === "install" ? new Set(["--skip-deps"]) : new Set();
@@ -41,9 +53,9 @@ export async function main(argv, { env = process.env } = {}) {
       return 0;
     }
     if (command === "doctor") {
-      const checks = await doctor(paths, { env });
-      for (const check of checks) console.log(`${check.ok ? "PASS" : "FAIL"}: ${check.name} (${check.detail})`);
-      return checks.every((check) => check.ok) ? 0 : 1;
+      const report = await doctorReport(paths, { env });
+      console.log(formatDoctorReport(report));
+      return report.checks.every((check) => check.ok) ? 0 : 1;
     }
     console.error(`Unknown command: ${command}`);
     usage();

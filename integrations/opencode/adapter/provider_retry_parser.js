@@ -17,6 +17,7 @@ import { dirname, join, resolve } from "node:path";
 
 const RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo";
 const DEFAULT_TAIL_BYTES = 1024 * 1024;
+const DEFAULT_LOG_CANDIDATE_LIMIT = 8;
 const DEFAULT_TTL_SECONDS = 300;
 const ACTIVE_RETRY_MIN_SECONDS = 90;
 const ACTIVE_RETRY_GRACE_SECONDS = 30;
@@ -54,6 +55,38 @@ export function selectLatestLogFile(logDir) {
   return files.at(-1) ?? null;
 }
 
+function retryMarkerInText(text) {
+  return text.includes("service=llm")
+    && /\bretry\b|RetryInfo|retryDelay|isRetryable|RESOURCE_EXHAUSTED/i.test(text);
+}
+
+function logCandidatesByRecentActivity(files) {
+  return [...files].sort((left, right) => {
+    const byMtime = right.mtimeMs - left.mtimeMs;
+    if (byMtime !== 0) return byMtime;
+    return right.name.localeCompare(left.name);
+  });
+}
+
+export function selectProviderRetryLogFile(logDir, {
+  tailBytes = DEFAULT_TAIL_BYTES,
+  candidateLimit = DEFAULT_LOG_CANDIDATE_LIMIT,
+} = {}) {
+  const files = listLogFiles(logDir);
+  if (files.length === 0) return null;
+  const candidates = logCandidatesByRecentActivity(files).slice(0, Math.max(1, candidateLimit));
+  for (const file of candidates) {
+    try {
+      const start = Math.max(0, file.size - tailBytes);
+      const tail = readRange(file.path, start, file.size);
+      if (retryMarkerInText(tail)) return file;
+    } catch {
+      continue;
+    }
+  }
+  return selectLatestLogFile(logDir);
+}
+
 function parseArgs(argv) {
   const values = new Map();
   let json = false;
@@ -81,12 +114,14 @@ function parseArgs(argv) {
 }
 
 function parseLogTimestamp(line) {
-  const match = /^(TRACE|DEBUG|INFO|WARN|ERROR)\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\b/.exec(line);
+  const match = /^(TRACE|DEBUG|INFO|WARN|ERROR)\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)\b/.exec(line);
   if (!match) return null;
-  const epochMs = Date.parse(match[2]);
+  const timestamp = match[2];
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp);
+  const epochMs = Date.parse(hasTimezone ? timestamp : `${timestamp}Z`);
   return {
     level: match[1],
-    timestamp: match[2],
+    timestamp,
     epoch_ms: Number.isFinite(epochMs) ? epochMs : null,
   };
 }
@@ -440,7 +475,7 @@ export function readProviderRetryState({
   tailBytes = DEFAULT_TAIL_BYTES,
 } = {}) {
   try {
-    const selected = selectLatestLogFile(logDir);
+    const selected = selectProviderRetryLogFile(logDir, { tailBytes });
     if (!selected) {
       return { ok: true, log_path: null, events: [], summaries: [], cursor: null };
     }
@@ -508,7 +543,7 @@ async function main() {
     return;
   }
 
-  const selected = options.log ? { path: options.log } : selectLatestLogFile(options.logDir);
+  const selected = options.log ? { path: options.log } : selectProviderRetryLogFile(options.logDir);
   if (!selected) {
     console.error(`No OpenCode log file found in ${options.logDir}`);
     process.exitCode = 1;

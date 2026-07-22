@@ -25,15 +25,21 @@ wait, inspect, or step in.
 OpenCode DB + OpenCode logs
   -> AWC Health Watcher
   -> Health JSON
-  -> OpenCode TUI plugin
-  -> Sidebar / compact indicator
+  -> OpenCode plugin
+  -> TUI sidebar / compact indicator, or Desktop background notification loop
 ```
 
-## What works in 0.2.5
+## What works in 0.2.6
 
 - Local npm CLI: `awc install`, `awc doctor`, `awc uninstall`.
 - OpenCode TUI Health surface with `Overall`, `Parent`, `Children`, `Reason`,
   `Tool`, and `Last Check`.
+- OpenCode Desktop background monitoring through the standard plugin lifecycle.
+- Opt-in native macOS desktop notifications for Health transitions.
+- Notification modes:
+  - `off`
+  - `problems-only`
+  - `all`
 - Polling that continues independently from OpenCode render/event activity.
 - Mounted OpenTUI text nodes update in place, so the screen reflects each check.
 - Stale watcher data becomes `Unknown` instead of preserving an old result.
@@ -61,6 +67,14 @@ npx ai-worker-companion@latest install
 npx ai-worker-companion@latest doctor
 ```
 
+Check the installed package version:
+
+```bash
+npx ai-worker-companion@latest version
+npx ai-worker-companion@latest --version
+npx ai-worker-companion@latest -v
+```
+
 The installer writes only AWC-managed files under the current user's XDG
 configuration and data directories. It preserves existing OpenCode settings and
 plugins.
@@ -70,6 +84,23 @@ To remove AWC-managed files:
 ```bash
 npx ai-worker-companion@latest uninstall
 ```
+
+`awc doctor` prints environment details first, then installation checks:
+
+```text
+AI Worker Companion Doctor
+
+AWC      : 0.2.6
+Node     : v24.x.x
+Platform : darwin-arm64
+OpenCode : 1.x.x
+Runtime  : ~/.local/share/awc
+Plugin   : ~/.local/share/awc/opencode/agent-companion.js
+```
+
+On Windows, AWC resolves npm/OpenCode executables through a shared command
+resolver. It prefers `npm_execpath` when npm provides it and handles `.cmd`
+wrappers without enabling `shell: true` globally.
 
 ## What you should see
 
@@ -100,6 +131,59 @@ Parent: Idle
 Children: none
 ```
 
+## Notifications
+
+AWC supports opt-in native macOS notifications. Notifications are disabled unless
+you explicitly select a mode.
+
+```bash
+AWC_NOTIFICATION_MODE=problems-only opencode .
+```
+
+Modes:
+
+- `off`: disable all AWC notifications.
+- `problems-only`: notify only when work becomes `Stuck`, enters provider retry
+  `Stuck`, or becomes `Failed`.
+- `all`: include normal completion notifications in addition to problem
+  notifications.
+
+Legacy opt-in is preserved: if `AWC_NOTIFICATION_MODE` is not set and
+`AWC_NOTIFICATION_ENABLED=1`, AWC treats it as `all`.
+
+## OpenCode Desktop support
+
+AWC supports the macOS OpenCode Desktop app as a background companion.
+
+Desktop support includes:
+
+- OpenCode Desktop loads the same global AWC plugin installed by `awc install`.
+- Desktop and TUI use the same local OpenCode DB and log evidence.
+- The same watcher and notification transition logic can run without the TUI
+  sidebar.
+- A file lock keeps only one notification poller active when Desktop loads the
+  plugin in multiple project contexts.
+
+Current Desktop behavior:
+
+- Desktop does not show the AWC sidebar or compact indicator.
+- AWC can still poll Health in the background and select macOS notifications
+  when `AWC_NOTIFICATION_MODE` is enabled.
+- If launched from Finder, Desktop may not inherit shell environment variables.
+  For explicit notification mode testing, launch it from a terminal with the
+  desired environment.
+
+### TUI vs Desktop surfaces
+
+| Surface | Supported behavior |
+|---|---|
+| OpenCode TUI | Sidebar, Compact Indicator, background polling, optional notifications |
+| OpenCode Desktop | Background polling and optional native macOS notifications |
+
+OpenCode Desktop `1.18.4` does not currently expose a plugin API for inserting
+AWC UI into the app. Desktop Sidebar, Panel, View, WebView, Status bar, and
+Toolbar surfaces are therefore not supported by AWC.
+
 ## Health states
 
 | Health | Meaning | Typical action |
@@ -122,7 +206,13 @@ primary signal. Health is based on structured local evidence.
 - Only direct child sessions are surfaced; recursive/nested child UI is not
   included.
 - OMO-specific active agent/job board integration is not included.
-- Desktop/mobile notifications are not included.
+- Desktop monitors the selected/latest session tree only. Aggregate monitoring
+  across multiple concurrent sessions is not yet supported.
+- OpenCode Desktop support is background-only. The AWC Sidebar and Compact
+  Indicator are available only in the OpenCode TUI because Desktop does not
+  currently expose a plugin UI API.
+- Native notifications are macOS-focused and opt-in; Windows/Linux native
+  notifications, mobile push, and notification history are not included.
 - Natural-language assistant text analysis is not included.
 - A direct TUI shell command may remain `Unknown` if OpenCode records no exit
   code.

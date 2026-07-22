@@ -1,6 +1,6 @@
 # Health Model
 
-This document defines the Health model used by `ai-worker-companion@0.2.5`.
+This document defines the Health model used by `ai-worker-companion@0.2.6`.
 
 AWC Health is evidence-based. It should explain what local OpenCode evidence was
 observed and avoid pretending to know hidden model intent.
@@ -135,7 +135,7 @@ retry older than TTL                   → ignored
 newer same-session DB activity exists  → retry cleared
 ```
 
-Provider retry does not become `failed` in 0.2.5. The user may still be able to
+Provider retry does not become `failed` in 0.2.6. The user may still be able to
 wait, change provider/model, or retry later.
 
 ## Parent/Child model
@@ -223,7 +223,8 @@ These fields are non-sensitive and intended for UI/debugging.
 - OMO active agent/job board state is not integrated.
 - Natural-language assistant text analysis is not used as a primary Health
   signal.
-- Notifications are not implemented.
+- Notifications are opt-in local companion behavior, not Health evidence. They
+  consume Health transitions but do not change Health decisions.
 
 ## Test coverage
 

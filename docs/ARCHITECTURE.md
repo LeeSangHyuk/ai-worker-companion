@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the AI Worker Companion architecture as of
-`ai-worker-companion@0.2.5`.
+`ai-worker-companion@0.2.6`.
 
 The short version:
 
@@ -30,7 +30,7 @@ It is not:
 - an LLM provider
 - an automatic recovery agent
 - a general OMO controller
-- a notification system
+- a cross-platform notification service
 
 ## Runtime data flow
 
@@ -50,8 +50,8 @@ AWC Watcher
 Health JSON
          ↓
 OpenCode Plugin
-         ↓
-Sidebar / Compact Indicator
+  ├─ TUI Sidebar / Compact Indicator
+  └─ Desktop-safe background notification loop
 ```
 
 ## Runtime components
@@ -76,8 +76,11 @@ Responsibilities:
 - install runtime dependencies under the AWC runtime directory
 - validate installation with `awc doctor`
 - uninstall only AWC-managed files
+- print the package version from `package.json`
 
 The CLI copies runtime files from the npm package into user-level XDG paths.
+It also centralizes external executable resolution in `npm/cli/paths.js` so
+`npm`, `npm.cmd`, and `opencode` are handled consistently across platforms.
 
 Common edit points:
 
@@ -85,7 +88,7 @@ Common edit points:
 |---|---|
 | Change install/uninstall behavior | `npm/cli/install.js`, `npm/test/install.test.js` |
 | Change doctor checks | `npm/cli/doctor.js`, `npm/test/doctor.test.js` |
-| Change path resolution | `npm/cli/paths.js` |
+| Change path, version, or executable resolution | `npm/cli/paths.js` |
 
 ### Plugin View
 
@@ -95,7 +98,7 @@ File:
 integrations/opencode/.opencode/plugins/agent-companion.js
 ```
 
-Responsibilities:
+TUI responsibilities:
 
 - call the watcher approximately every five seconds
 - keep polling alive independent of OpenCode render/event activity
@@ -111,7 +114,39 @@ Responsibilities:
 
 The compact indicator shows Overall Health only.
 
-The plugin does not own Health policy. It renders watcher output.
+Standard plugin responsibilities:
+
+- start the notification controller when `AWC_NOTIFICATION_MODE` enables it
+- reuse the same watcher and Health transition policy as the TUI surface
+- avoid duplicate notification pollers across multiple OpenCode plugin contexts
+  with an AWC-managed file lock
+- log non-sensitive notification decisions with `client.app.log`
+
+The plugin does not own Health policy. It renders watcher output in TUI mode and
+uses the same output to drive opt-in notifications in Desktop/no-TUI mode.
+
+### Desktop behavior
+
+OpenCode Desktop loads the global AWC plugin from the same user-level plugin
+directory as the TUI path. The Desktop app does not expose the OpenTUI sidebar
+slots, so AWC Desktop support is intentionally background-only for now:
+
+```text
+OpenCode Desktop
+  ↓
+standard plugin lifecycle
+  ↓
+AWC notification controller
+  ↓
+DB/log watcher
+  ↓
+optional macOS notification
+```
+
+Desktop can load the plugin multiple times for different directories. AWC uses a
+runtime lock file under the AWC data directory so only one notification
+controller owns polling at a time. If the owner process disappears, the next
+plugin instance can reclaim the stale lock.
 
 Common edit points:
 
@@ -119,6 +154,7 @@ Common edit points:
 |---|---|
 | Change sidebar or compact display | `integrations/opencode/.opencode/plugins/agent-companion.js` |
 | Change polling/stale UI behavior | `npm/test/health-refresh.test.js` |
+| Change notification mode or Desktop-safe polling | `integrations/opencode/.opencode/plugins/agent-companion.js`, `npm/test/health-refresh.test.js` |
 | Update user-facing display examples | `README.md`, `CHANGELOG.md` |
 
 ### DB Health Watcher

@@ -2,8 +2,8 @@ import { access, copyFile, mkdir, rm } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { spawnSync } from "node:child_process";
 import { parseJsonFile, readOptional, restore, writeAtomic, writeJson } from "./files.js";
+import { runCommand } from "./paths.js";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const TUI_ENTRY = "./tui-plugins/awc.js";
@@ -58,10 +58,9 @@ export async function install(paths, { env = process.env, skipDependencies = fal
     maybeFail(env, "config");
 
     if (!skipDependencies && env.AWC_SKIP_DEPENDENCY_INSTALL !== "1") {
-      const npm = spawnSync("npm", ["install", "--omit=dev", "--ignore-scripts"], {
+      const npm = runCommand("npm", ["install", "--omit=dev", "--ignore-scripts"], {
         cwd: paths.runtimeDir,
         env,
-        encoding: "utf8",
       });
       if (npm.status !== 0) throw new Error(`npm install failed: ${npm.stderr || npm.stdout}`);
     }

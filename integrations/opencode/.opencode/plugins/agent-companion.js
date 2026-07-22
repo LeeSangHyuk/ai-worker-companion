@@ -1,23 +1,23 @@
-// Minimal OpenCode plugin skeleton for AI Worker Companion.
+// OpenCode TUI plugin for AI Worker Companion.
 //
 // This is intentionally conservative:
 // - no LLM API calls
-// - no extractor/schema/session_state.py changes
 // - no automatic recovery
 // - no automatic new session execution
-//
-// The working MVP path is the slash command in .opencode/commands.
-// This plugin exists to validate future status/notification hooks.
+// - no Health policy in the View layer
 
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const SIDEBAR_MIN_WIDTH = 100;
 const HEALTH_REFRESH_THROTTLE_MS = 1500;
 const HEALTH_POLL_INTERVAL_MS = positiveInteger(process.env.AWC_HEALTH_POLL_INTERVAL_MS, 5000);
 const HEALTH_STALE_AFTER_MS = positiveInteger(process.env.AWC_HEALTH_STALE_AFTER_MS, 15000);
+const NOTIFICATION_COOLDOWN_MS = positiveInteger(process.env.AWC_NOTIFICATION_COOLDOWN_MS, 30000);
+const NOTIFICATION_MODES = new Set(["off", "problems-only", "all"]);
+const NOTIFICATION_LOCK_STALE_MS = positiveInteger(process.env.AWC_NOTIFICATION_LOCK_STALE_MS, 6 * 60 * 60 * 1000);
 const DEBUG_LAYOUT = process.env.COMPANION_DEBUG_LAYOUT === "1";
 const DEFAULT_OPENCODE_DB = join(homedir(), ".local/share/opencode/opencode.db");
 const HEALTH_REFRESH_EVENTS = new Set([
@@ -42,15 +42,131 @@ const HEALTH_REFRESH_EVENTS = new Set([
   "session.next.tool.failed",
 ]);
 let activeTuiCleanup = null;
+let activePluginNotificationCleanup = null;
+let activePluginNotificationRuntime = null;
 
 export function replaceActiveTuiCleanup(nextCleanup) {
   if (activeTuiCleanup && activeTuiCleanup !== nextCleanup) activeTuiCleanup();
   activeTuiCleanup = nextCleanup;
 }
 
+export function replaceActivePluginNotificationCleanup(nextCleanup) {
+  const slot = sharedPluginNotificationRuntimeSlot();
+  const currentCleanup = slot.cleanup ?? activePluginNotificationCleanup;
+  if (currentCleanup && currentCleanup !== nextCleanup) currentCleanup();
+  activePluginNotificationCleanup = nextCleanup;
+  slot.cleanup = nextCleanup;
+  if (nextCleanup === null) {
+    activePluginNotificationRuntime = null;
+    slot.runtime = null;
+  }
+}
+
+export function createNotificationStore() {
+  return { lastNotification: null };
+}
+
+function sharedNotificationStore() {
+  const key = "__awcNotificationStore";
+  globalThis[key] ??= createNotificationStore();
+  return globalThis[key];
+}
+
+function sharedPluginNotificationRuntimeSlot() {
+  const key = "__awcPluginNotificationRuntime";
+  globalThis[key] ??= { runtime: null, cleanup: null };
+  return globalThis[key];
+}
+
+export function resetSharedPluginNotificationRuntime() {
+  replaceActivePluginNotificationCleanup(null);
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function notificationLockPath(env = process.env) {
+  const runtimeDir = env.AWC_RUNTIME_DIR ?? join(homedir(), ".local/share/awc");
+  return env.AWC_NOTIFICATION_LOCK_PATH ?? join(runtimeDir, "plugin-notification.lock");
+}
+
+function readLockOwner(path) {
+  try {
+    return JSON.parse(readFileSync(join(path, "owner.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+export function acquirePluginNotificationLock({
+  env = process.env,
+  now = () => Date.now(),
+  pid = process.pid,
+  staleMs = NOTIFICATION_LOCK_STALE_MS,
+} = {}) {
+  const path = notificationLockPath(env);
+  const create = () => {
+    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(path);
+    writeFileSync(join(path, "owner.json"), JSON.stringify({
+      pid,
+      createdAt: now(),
+    }));
+    return {
+      acquired: true,
+      path,
+      release() {
+        rmSync(path, { recursive: true, force: true });
+      },
+    };
+  };
+
+  try {
+    return create();
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+  }
+
+  const owner = readLockOwner(path);
+  const ownerPid = Number(owner?.pid);
+  const createdAt = Number(owner?.createdAt);
+  const stale = !Number.isFinite(createdAt) || now() - createdAt > staleMs;
+  if (!processIsAlive(ownerPid) || stale) {
+    rmSync(path, { recursive: true, force: true });
+    return create();
+  }
+
+  return {
+    acquired: false,
+    path,
+    ownerPid,
+    release() {},
+  };
+}
+
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function enabledFlag(value, fallback = false) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+export function resolveNotificationMode({ mode, enabled } = {}) {
+  if (mode !== undefined && mode !== null && String(mode).trim() !== "") {
+    const normalized = String(mode).trim().toLowerCase();
+    return NOTIFICATION_MODES.has(normalized) ? normalized : "off";
+  }
+  return enabledFlag(enabled) ? "all" : "off";
 }
 
 function repoRootFromDirectory(directory) {
@@ -74,6 +190,128 @@ function labelForHealth(health) {
     default:
       return "Unknown";
   }
+}
+
+function stateHealth(state) {
+  return typeof state?.health === "string" ? state.health : String(state?.status ?? "").toLowerCase();
+}
+
+function stateSessionId(state) {
+  return state?.sessionId ?? state?.session?.id ?? null;
+}
+
+function stateSessionTitle(state) {
+  return state?.sessionTitle ?? state?.session?.title ?? null;
+}
+
+function stateProviderRetryActive(state) {
+  return state?.providerRetry?.active === true || state?.provider_retry?.active === true;
+}
+
+function notificationSessionSuffix(state) {
+  const title = oneLine(stateSessionTitle(state) ?? stateSessionId(state) ?? "", 48);
+  return title ? `\nSession: ${title}` : "";
+}
+
+export function selectHealthNotification(previous, current) {
+  if (!previous || !current) return null;
+  const previousSessionId = stateSessionId(previous);
+  const currentSessionId = stateSessionId(current);
+  if (!previousSessionId || !currentSessionId || previousSessionId !== currentSessionId) return null;
+
+  const from = stateHealth(previous);
+  const to = stateHealth(current);
+  if (!from || !to || from === to) return null;
+
+  const activeStates = new Set(["active", "quiet", "stuck"]);
+  const sessionSuffix = notificationSessionSuffix(current);
+  const base = {
+    sessionId: currentSessionId,
+    from,
+    to,
+    checkedAtMs: current.checkedAtMs ?? null,
+  };
+
+  if (activeStates.has(from) && to === "idle") {
+    return {
+      ...base,
+      type: "completed",
+      title: "AWC — 작업 완료",
+      message: `OpenCode 작업이 완료되었습니다.${sessionSuffix}`,
+    };
+  }
+
+  if (["active", "quiet"].includes(from) && to === "stuck") {
+    if (stateProviderRetryActive(current)) {
+      return {
+        ...base,
+        type: "provider_retry",
+        title: "AWC — Provider retry",
+        message: `모델 제공자의 반복 재시도로 작업이 지연되고 있습니다.${sessionSuffix}`,
+      };
+    }
+    return {
+      ...base,
+      type: "attention",
+      title: "AWC — 확인 필요",
+      message: `작업이 진행되지 않고 있습니다.${sessionSuffix}`,
+    };
+  }
+
+  if (activeStates.has(from) && to === "failed") {
+    return {
+      ...base,
+      type: "failed",
+      title: "AWC — 작업 실패",
+      message: `OpenCode 작업이 실패했습니다.${sessionSuffix}`,
+    };
+  }
+
+  return null;
+}
+
+function notificationKey(notification) {
+  return [
+    notification.sessionId ?? "",
+    notification.type ?? "",
+    notification.from ?? "",
+    notification.to ?? "",
+  ].join("\u0000");
+}
+
+function allowsNotificationMode(mode, notification) {
+  if (mode === "all") return true;
+  if (mode === "problems-only") return notification?.type !== "completed";
+  return false;
+}
+
+function appleScriptString(value) {
+  return `"${String(value ?? "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`;
+}
+
+export function createMacOSNotifier({
+  execFileFn = execFile,
+  platformName = process.platform,
+  timeoutMs = 3000,
+} = {}) {
+  return {
+    notify(notification) {
+      if (platformName !== "darwin") return Promise.resolve({ ok: false, skipped: "unsupported_platform" });
+      const script = `display notification ${appleScriptString(notification.message)} with title ${appleScriptString(notification.title)}`;
+      return new Promise((resolveNotify) => {
+        execFileFn("osascript", ["-e", script], { timeout: timeoutMs }, (error) => {
+          resolveNotify({
+            ok: !error,
+            error: error ? (error.message ?? String(error)) : null,
+          });
+        });
+      });
+    },
+  };
+}
+
+export function createDefaultNotifier() {
+  return createMacOSNotifier();
 }
 
 function compactToolSummary(result) {
@@ -188,6 +426,9 @@ async function readHealthState(directory, { signal } = {}) {
       toolStatus: null,
       toolElapsedSeconds: null,
       toolExit: null,
+      sessionId: null,
+      sessionTitle: null,
+      providerRetry: { active: false },
       refreshSucceeded: false,
       checkedAtMs: null,
     };
@@ -241,6 +482,9 @@ async function readHealthState(directory, { signal } = {}) {
       childrenSummary,
       childrenLabel: formatChildrenSummary(childrenSummary),
       childDetails,
+      sessionId: result?.session?.id ?? null,
+      sessionTitle: result?.session?.title ?? null,
+      providerRetry: result?.provider_retry ?? { active: false },
       refreshSucceeded: typeof result?.checked_at === "number",
       checkedAtMs: typeof result?.checked_at === "number" ? result.checked_at * 1000 : null,
     };
@@ -263,6 +507,9 @@ async function readHealthState(directory, { signal } = {}) {
       childrenSummary: null,
       childrenLabel: "none",
       childDetails: [],
+      sessionId: null,
+      sessionTitle: null,
+      providerRetry: { active: false },
       refreshSucceeded: false,
       checkedAtMs: null,
     };
@@ -278,8 +525,18 @@ export function createHealthRefreshController({
   pollIntervalMs = HEALTH_POLL_INTERVAL_MS,
   staleAfterMs = HEALTH_STALE_AFTER_MS,
   throttleMs = HEALTH_REFRESH_THROTTLE_MS,
+  notifier = null,
+  notificationEnabled = false,
+  notificationMode,
+  notificationCooldownMs = NOTIFICATION_COOLDOWN_MS,
+  notificationStore = createNotificationStore(),
 } = {}) {
   if (typeof read !== "function") throw new TypeError("read must be a function");
+
+  const effectiveNotificationMode = resolveNotificationMode({
+    mode: notificationMode,
+    enabled: notificationEnabled,
+  });
 
   let state = null;
   let lastSuccessfulRefreshAt = null;
@@ -288,6 +545,28 @@ export function createHealthRefreshController({
   let inFlight = false;
   let activeAbortController = null;
   let disposed = false;
+
+  async function maybeNotify(previousState, nextState, attemptedAt) {
+    if (effectiveNotificationMode === "off" || !notifier?.notify) return;
+    const notification = selectHealthNotification(previousState, nextState);
+    if (!notification) return;
+    if (!allowsNotificationMode(effectiveNotificationMode, notification)) return;
+    const key = notificationKey(notification);
+    const previousNotification = notificationStore.lastNotification;
+    if (
+      previousNotification
+      && previousNotification.key === key
+      && attemptedAt - previousNotification.sentAt < notificationCooldownMs
+    ) {
+      return;
+    }
+    notificationStore.lastNotification = { key, sentAt: attemptedAt };
+    try {
+      await notifier.notify(notification);
+    } catch {
+      // Notification failures must never stop Health polling.
+    }
+  }
 
   async function refresh({ force = false } = {}) {
     const attemptedAt = now();
@@ -320,8 +599,10 @@ export function createHealthRefreshController({
     if (disposed) return false;
 
     if (nextState?.refreshSucceeded) {
+      const previousState = state;
       state = nextState;
       lastSuccessfulRefreshAt = nextState.checkedAtMs ?? attemptedAt;
+      await maybeNotify(previousState, nextState, attemptedAt);
       return true;
     }
 
@@ -394,6 +675,127 @@ export function createHealthRefreshController({
     tick,
     isRefreshing: () => inFlight,
   };
+}
+
+export async function startPluginNotificationController({
+  directory,
+  env = process.env,
+  read = ({ signal }) => readHealthState(directory, { signal }),
+  notifier = createDefaultNotifier(),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  now = () => Date.now(),
+  pollIntervalMs = HEALTH_POLL_INTERVAL_MS,
+  staleAfterMs = HEALTH_STALE_AFTER_MS,
+  throttleMs = HEALTH_REFRESH_THROTTLE_MS,
+  notificationCooldownMs = NOTIFICATION_COOLDOWN_MS,
+  notificationStore = sharedNotificationStore(),
+  log = async () => {},
+} = {}) {
+  const mode = resolveNotificationMode({
+    mode: env.AWC_NOTIFICATION_MODE,
+    enabled: env.AWC_NOTIFICATION_ENABLED,
+  });
+  if (mode === "off") {
+    await log("debug", "Notification controller disabled.", { mode });
+    return {
+      enabled: false,
+      mode,
+      stop() {},
+      refresh: async () => false,
+      controller: null,
+    };
+  }
+
+  const observedNotifier = notifier?.notify
+    ? {
+      notify: async (notification) => {
+        await log("info", "Notification selected.", {
+          type: notification.type,
+          from: notification.from,
+          to: notification.to,
+        });
+        return notifier.notify(notification);
+      },
+    }
+    : notifier;
+
+  const controller = createHealthRefreshController({
+    read,
+    requestRender: () => {},
+    notifier: observedNotifier,
+    notificationMode: mode,
+    notificationEnabled: env.AWC_NOTIFICATION_ENABLED,
+    notificationCooldownMs,
+    notificationStore,
+    now,
+    setIntervalFn,
+    clearIntervalFn,
+    pollIntervalMs,
+    staleAfterMs,
+    throttleMs,
+  });
+  await controller.refresh({ force: true });
+  controller.start();
+  await log("debug", "Notification controller started.", { mode });
+  return {
+    enabled: true,
+    mode,
+    stop: () => controller.stop(),
+    refresh: (options) => controller.refresh(options),
+    controller,
+  };
+}
+
+export async function startSharedPluginNotificationController(options = {}) {
+  const mode = resolveNotificationMode({
+    mode: options.env?.AWC_NOTIFICATION_MODE ?? process.env.AWC_NOTIFICATION_MODE,
+    enabled: options.env?.AWC_NOTIFICATION_ENABLED ?? process.env.AWC_NOTIFICATION_ENABLED,
+  });
+  const slot = sharedPluginNotificationRuntimeSlot();
+  const activeRuntime = slot.runtime ?? activePluginNotificationRuntime;
+
+  if (activeRuntime && activeRuntime.mode === mode) {
+    await options.log?.("debug", "Notification controller already active.", { mode });
+    activePluginNotificationRuntime = activeRuntime;
+    return activeRuntime;
+  }
+
+  const lock = options.lock ?? (options.useLock ? acquirePluginNotificationLock({
+    env: options.env ?? process.env,
+    now: options.now,
+  }) : { acquired: true, release() {} });
+  if (!lock.acquired) {
+    await options.log?.("debug", "Notification controller already active in another plugin context.", {
+      mode,
+      ownerPid: lock.ownerPid ?? null,
+    });
+    return {
+      enabled: false,
+      mode,
+      stop() {},
+      refresh: async () => false,
+      controller: null,
+      lock,
+    };
+  }
+
+  activeRuntime?.stop?.();
+  const runtime = await startPluginNotificationController(options);
+  const cleanup = () => {
+    runtime.stop();
+    lock.release?.();
+    if (activePluginNotificationRuntime === runtime) activePluginNotificationRuntime = null;
+    if (activePluginNotificationCleanup === cleanup) activePluginNotificationCleanup = null;
+    if (slot.runtime === runtime) slot.runtime = null;
+    if (slot.cleanup === cleanup) slot.cleanup = null;
+  };
+  activePluginNotificationRuntime = runtime;
+  activePluginNotificationCleanup = cleanup;
+  slot.runtime = runtime;
+  slot.cleanup = cleanup;
+  runtime.lock = lock;
+  return runtime;
 }
 
 export function registerHealthEventHandlers(eventBus, controller, requestRender) {
@@ -509,12 +911,12 @@ function createCompactStatus(solid, theme, state, debug) {
   };
 }
 
-export const AgentCompanionPlugin = async ({ client }) => {
+export const AgentCompanionPlugin = async ({ client, directory }) => {
   async function log(level, message, extra = {}) {
     if (!client?.app?.log) return;
     await client.app.log({
       body: {
-        service: "agent-session-state-extractor",
+        service: "ai-worker-companion",
         level,
         message,
         extra,
@@ -522,20 +924,38 @@ export const AgentCompanionPlugin = async ({ client }) => {
     });
   }
 
-  await log("info", "AI Worker Companion OpenCode plugin skeleton initialized");
-
+  await log("info", "AI Worker Companion OpenCode plugin initialized");
+  const notificationRuntime = await startSharedPluginNotificationController({
+    directory,
+    log,
+    useLock: true,
+  }).catch(async (error) => {
+    await log("warn", "Notification controller failed to start.", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      enabled: false,
+      mode: "off",
+      stop() {},
+      refresh: async () => false,
+      controller: null,
+    };
+  });
   return {
     event: async ({ event }) => {
       if (!event?.type) return;
+      if (notificationRuntime.enabled && HEALTH_REFRESH_EVENTS.has(event.type)) {
+        await notificationRuntime.refresh().catch(() => {});
+      }
 
       if (event.type === "session.idle") {
-        await log("info", "Session idle observed. Companion handoff can be requested with /companion-handoff.", {
+        await log("debug", "Session idle observed.", {
           eventType: event.type,
         });
       }
 
       if (event.type === "session.error") {
-        await log("warn", "Session error observed. Companion state can be requested with /companion-state.", {
+        await log("warn", "Session error observed.", {
           eventType: event.type,
         });
       }
@@ -585,6 +1005,9 @@ export const tui = async (api, _options, meta) => {
   controller = createHealthRefreshController({
     read: ({ signal }) => readHealthState(directory, { signal }),
     requestRender: updateMountedSurfaces,
+    // Notifications are owned by AgentCompanionPlugin, which is loaded through
+    // OpenCode's standard plugin lifecycle. Keeping TUI notification-free avoids
+    // duplicate OS notifications when both plugin surfaces are active.
   });
   await controller.refresh({ force: true });
 

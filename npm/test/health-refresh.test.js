@@ -1,13 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  acquirePluginNotificationLock,
   createHealthRefreshController,
+  createNotificationStore,
   executeWatcher,
   registerHealthEventHandlers,
+  replaceActivePluginNotificationCleanup,
   replaceActiveTuiCleanup,
+  resolveNotificationMode,
+  startPluginNotificationController,
+  startSharedPluginNotificationController,
 } from "../../integrations/opencode/.opencode/plugins/agent-companion.js";
 
-function healthState({ health = "idle", checkedAtMs, lastUpdate = "9:36 PM" } = {}) {
+function healthState({ health = "idle", checkedAtMs, lastUpdate = "9:36 PM", sessionId = "ses_test", providerRetryActive = false } = {}) {
   const status = health[0].toUpperCase() + health.slice(1);
   return {
     health,
@@ -15,6 +24,9 @@ function healthState({ health = "idle", checkedAtMs, lastUpdate = "9:36 PM" } = 
     reason: health === "idle" ? "No tool has run in the selected session yet." : health,
     currentState: health,
     lastUpdate,
+    sessionId,
+    sessionTitle: "Test session",
+    providerRetry: { active: providerRetryActive },
     refreshSucceeded: true,
     checkedAtMs,
   };
@@ -228,6 +240,564 @@ test("polling refreshes even when rendering throws", async () => {
   await clock.tick();
   assert.equal(reads, 3);
   controller.stop();
+});
+
+test("initial Idle does not send a notification", async () => {
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => healthState({ health: "idle", checkedAtMs: 1_000 }),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+    now: () => 1_000,
+  });
+
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("notification mode defaults to off without explicit opt-in", async () => {
+  assert.equal(resolveNotificationMode(), "off");
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("notification mode off prevents notifier calls", async () => {
+  assert.equal(resolveNotificationMode({ mode: "off", enabled: "1" }), "off");
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "stuck", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "off",
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("problems-only mode does not send completion notifications", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "problems-only",
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("problems-only mode sends Stuck notifications", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "stuck", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "problems-only",
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "attention");
+});
+
+test("problems-only mode sends provider retry notifications", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "stuck", checkedAtMs: 2_000, providerRetryActive: true }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "problems-only",
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "provider_retry");
+});
+
+test("problems-only mode sends Failed notifications", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "failed", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "problems-only",
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "failed");
+});
+
+test("all mode sends completion notifications", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "all",
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "completed");
+});
+
+test("legacy notification enabled without mode preserves all notifications", async () => {
+  assert.equal(resolveNotificationMode({ enabled: "1" }), "all");
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "completed");
+});
+
+test("notification mode takes precedence over legacy enabled flag", async () => {
+  assert.equal(resolveNotificationMode({ mode: "problems-only", enabled: "1" }), "problems-only");
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+    notificationMode: "problems-only",
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("invalid notification mode safely disables notifications", async () => {
+  assert.equal(resolveNotificationMode({ mode: "loud", enabled: "1" }), "off");
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "failed", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationMode: "loud",
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("Active to Idle sends one completed notification", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+    now: () => 2_000,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "completed");
+  assert.equal(notifications[0].title, "AWC — 작업 완료");
+});
+
+test("Quiet to Idle sends a completed notification", async () => {
+  const states = [
+    healthState({ health: "quiet", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "completed");
+});
+
+test("Active to Stuck sends an attention notification", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "stuck", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "attention");
+});
+
+test("provider retry Stuck sends a provider retry notification", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "stuck", checkedAtMs: 2_000, providerRetryActive: true }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "provider_retry");
+  assert.equal(notifications[0].title, "AWC — Provider retry");
+});
+
+test("Stuck to Stuck does not repeat a notification", async () => {
+  const states = [
+    healthState({ health: "stuck", checkedAtMs: 1_000 }),
+    healthState({ health: "stuck", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("Unknown to Idle does not send a notification", async () => {
+  const states = [
+    healthState({ health: "unknown", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("different sessions are not compared for completion notifications", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000, sessionId: "ses_a" }),
+    healthState({ health: "idle", checkedAtMs: 2_000, sessionId: "ses_b" }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
+});
+
+test("same transition notification is suppressed during cooldown", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+    healthState({ health: "active", checkedAtMs: 3_000 }),
+    healthState({ health: "idle", checkedAtMs: 4_000 }),
+  ];
+  const notifications = [];
+  let now = 1_000;
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: true,
+    notificationCooldownMs: 30_000,
+    now: () => now,
+  });
+
+  for (const value of [1_000, 2_000, 3_000, 4_000]) {
+    now = value;
+    await controller.refresh({ force: true });
+  }
+  assert.equal(notifications.length, 1);
+});
+
+test("shared notification store suppresses duplicate notifications across controllers", async () => {
+  const notificationStore = createNotificationStore();
+  const notifications = [];
+  const makeController = () => {
+    const states = [
+      healthState({ health: "active", checkedAtMs: 1_000 }),
+      healthState({ health: "idle", checkedAtMs: 2_000 }),
+    ];
+    return createHealthRefreshController({
+      read: async () => states.shift(),
+      notifier: { notify: async (event) => notifications.push(event) },
+      notificationMode: "all",
+      notificationCooldownMs: 30_000,
+      notificationStore,
+      now: () => 2_000,
+    });
+  };
+
+  const first = makeController();
+  const second = makeController();
+  await first.refresh({ force: true });
+  await second.refresh({ force: true });
+  await first.refresh({ force: true });
+  await second.refresh({ force: true });
+
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "completed");
+});
+
+test("plugin notification runtime stays disabled when mode is off", async () => {
+  let reads = 0;
+  const logs = [];
+  const runtime = await startPluginNotificationController({
+    env: { AWC_NOTIFICATION_MODE: "off" },
+    read: async () => {
+      reads += 1;
+      return healthState({ health: "active", checkedAtMs: 1_000 });
+    },
+    log: async (level, message, extra) => logs.push({ level, message, extra }),
+  });
+
+  assert.equal(runtime.enabled, false);
+  assert.equal(runtime.mode, "off");
+  assert.equal(reads, 0);
+  assert.equal(logs[0].message, "Notification controller disabled.");
+});
+
+test("plugin notification runtime sends completion notifications from polling", async () => {
+  const clock = scheduler();
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const runtime = await startPluginNotificationController({
+    env: { AWC_NOTIFICATION_MODE: "all" },
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    setIntervalFn: clock.setIntervalFn,
+    clearIntervalFn: clock.clearIntervalFn,
+    notificationStore: createNotificationStore(),
+    now: () => 2_000,
+  });
+
+  assert.equal(runtime.enabled, true);
+  assert.equal(notifications.length, 0);
+  await clock.tick();
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "completed");
+  runtime.stop();
+  assert.equal(clock.isScheduled(), false);
+});
+
+test("shared plugin notification runtime is reused across plugin instances", async () => {
+  replaceActivePluginNotificationCleanup(null);
+  const clock = scheduler();
+  let reads = 0;
+  const logs = [];
+
+  const first = await startSharedPluginNotificationController({
+    env: { AWC_NOTIFICATION_MODE: "all" },
+    read: async () => {
+      reads += 1;
+      return healthState({ health: "active", checkedAtMs: 1_000 });
+    },
+    notifier: { notify: async () => {} },
+    setIntervalFn: clock.setIntervalFn,
+    clearIntervalFn: clock.clearIntervalFn,
+    notificationStore: createNotificationStore(),
+    log: async (level, message, extra) => logs.push({ level, message, extra }),
+  });
+
+  const second = await startSharedPluginNotificationController({
+    env: { AWC_NOTIFICATION_MODE: "all" },
+    read: async () => {
+      throw new Error("second runtime should not start");
+    },
+    notifier: { notify: async () => {} },
+    setIntervalFn: clock.setIntervalFn,
+    clearIntervalFn: clock.clearIntervalFn,
+    log: async (level, message, extra) => logs.push({ level, message, extra }),
+  });
+
+  assert.equal(first, second);
+  assert.equal(reads, 1);
+  assert.equal(logs.at(-1).message, "Notification controller already active.");
+  assert.equal(clock.isScheduled(), true);
+  replaceActivePluginNotificationCleanup(null);
+  assert.equal(clock.isScheduled(), false);
+});
+
+test("shared plugin notification runtime restarts when mode changes", async () => {
+  replaceActivePluginNotificationCleanup(null);
+  const firstClock = scheduler();
+  const secondClock = scheduler();
+
+  const first = await startSharedPluginNotificationController({
+    env: { AWC_NOTIFICATION_MODE: "problems-only" },
+    read: async () => healthState({ health: "active", checkedAtMs: 1_000 }),
+    notifier: { notify: async () => {} },
+    setIntervalFn: firstClock.setIntervalFn,
+    clearIntervalFn: firstClock.clearIntervalFn,
+    notificationStore: createNotificationStore(),
+  });
+  const second = await startSharedPluginNotificationController({
+    env: { AWC_NOTIFICATION_MODE: "all" },
+    read: async () => healthState({ health: "active", checkedAtMs: 2_000 }),
+    notifier: { notify: async () => {} },
+    setIntervalFn: secondClock.setIntervalFn,
+    clearIntervalFn: secondClock.clearIntervalFn,
+    notificationStore: createNotificationStore(),
+  });
+
+  assert.notEqual(first, second);
+  assert.equal(firstClock.isScheduled(), false);
+  assert.equal(secondClock.isScheduled(), true);
+  replaceActivePluginNotificationCleanup(null);
+});
+
+test("plugin notification lock allows only one active owner", () => {
+  const dir = mkdtempSync(join(tmpdir(), "awc-lock-test-"));
+  const env = { AWC_NOTIFICATION_LOCK_PATH: join(dir, "notification.lock") };
+  const first = acquirePluginNotificationLock({ env, pid: process.pid, now: () => 1_000 });
+  const second = acquirePluginNotificationLock({ env, pid: process.pid, now: () => 2_000 });
+
+  assert.equal(first.acquired, true);
+  assert.equal(second.acquired, false);
+  assert.equal(second.ownerPid, process.pid);
+  first.release();
+  const third = acquirePluginNotificationLock({ env, pid: process.pid, now: () => 3_000 });
+  assert.equal(third.acquired, true);
+  third.release();
+});
+
+test("shared plugin notification runtime skips when another context owns the lock", async () => {
+  replaceActivePluginNotificationCleanup(null);
+  const dir = mkdtempSync(join(tmpdir(), "awc-runtime-lock-test-"));
+  const env = {
+    AWC_NOTIFICATION_MODE: "all",
+    AWC_NOTIFICATION_LOCK_PATH: join(dir, "notification.lock"),
+  };
+  const lock = acquirePluginNotificationLock({ env, pid: process.pid, now: () => 1_000 });
+  let reads = 0;
+  const runtime = await startSharedPluginNotificationController({
+    env,
+    useLock: true,
+    now: () => 2_000,
+    read: async () => {
+      reads += 1;
+      return healthState({ health: "active", checkedAtMs: 1_000 });
+    },
+    notifier: { notify: async () => {} },
+  });
+
+  assert.equal(runtime.enabled, false);
+  assert.equal(reads, 0);
+  lock.release();
+});
+
+test("notifier failure does not break refresh", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async () => { throw new Error("notification failed"); } },
+    notificationEnabled: true,
+    now: () => 2_000,
+  });
+
+  await controller.refresh({ force: true });
+  assert.equal(await controller.refresh({ force: true }), true);
+  assert.equal(controller.getState().status, "Idle");
+});
+
+test("notification disabled prevents notifier calls", async () => {
+  const states = [
+    healthState({ health: "active", checkedAtMs: 1_000 }),
+    healthState({ health: "idle", checkedAtMs: 2_000 }),
+  ];
+  const notifications = [];
+  const controller = createHealthRefreshController({
+    read: async () => states.shift(),
+    notifier: { notify: async (event) => notifications.push(event) },
+    notificationEnabled: false,
+  });
+
+  await controller.refresh({ force: true });
+  await controller.refresh({ force: true });
+  assert.equal(notifications.length, 0);
 });
 
 test("replacing a TUI runtime disposes the previous runtime", () => {

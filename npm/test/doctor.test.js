@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { doctor } from "../cli/doctor.js";
+import { doctor, doctorReport, formatDoctorReport } from "../cli/doctor.js";
 import { install } from "../cli/install.js";
-import { resolvePaths } from "../cli/paths.js";
+import { getPackageVersion, resolvePaths } from "../cli/paths.js";
 
 async function environment() {
   const home = await mkdtemp(join(tmpdir(), "awc-doctor-"));
@@ -34,6 +34,26 @@ test("doctor reports a complete temporary installation", async () => {
   await writeFile(paths.database, "fixture");
   const checks = await doctor(paths, { env });
   assert.equal(checks.every((check) => check.ok), true, JSON.stringify(checks, null, 2));
+});
+
+test("doctor report includes diagnostic header", async () => {
+  const { env, paths } = await environment();
+  await install(paths, { env });
+  await mkdir(join(paths.runtimeDir, "node_modules/@opentui/solid"), { recursive: true });
+  await writeFile(join(paths.runtimeDir, "node_modules/@opentui/solid/package.json"), "{}\n");
+  await mkdir(join(paths.dataHome, "opencode"), { recursive: true });
+  await writeFile(paths.database, "fixture");
+  const report = await doctorReport(paths, { env });
+  assert.equal(report.summary.awcVersion, getPackageVersion());
+  assert.equal(report.summary.openCodeVersion, "1.15.12");
+  const text = formatDoctorReport(report);
+  assert.match(text, /AI Worker Companion Doctor/);
+  assert.match(text, new RegExp(`AWC      : ${getPackageVersion().replaceAll(".", "\\.")}`));
+  assert.match(text, /Node     : v/);
+  assert.match(text, /Platform : /);
+  assert.match(text, /OpenCode : 1\.15\.12/);
+  assert.match(text, /Runtime  : /);
+  assert.match(text, /Plugin   : /);
 });
 
 test("doctor reports missing installation files", async () => {
