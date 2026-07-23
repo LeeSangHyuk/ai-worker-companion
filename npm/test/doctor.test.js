@@ -10,18 +10,24 @@ import { getPackageVersion, resolvePaths } from "../cli/paths.js";
 async function environment() {
   const home = await mkdtemp(join(tmpdir(), "awc-doctor-"));
   const bin = join(home, "bin");
+  const testPath = `${bin}${delimiter}${process.env.PATH ?? process.env.Path ?? ""}`;
   const env = {
     ...process.env,
     HOME: home,
     XDG_CONFIG_HOME: join(home, "config"),
     XDG_DATA_HOME: join(home, "data"),
     AWC_SKIP_DEPENDENCY_INSTALL: "1",
-    PATH: `${bin}${delimiter}${process.env.PATH}`,
+    PATH: testPath,
+    Path: testPath,
   };
   await mkdir(bin, { recursive: true });
-  const executable = join(bin, "opencode");
-  await writeFile(executable, "#!/bin/sh\necho 1.15.12\n");
-  await chmod(executable, 0o755);
+  if (process.platform === "win32") {
+    await writeFile(join(bin, "opencode.cmd"), "@echo off\r\necho 1.15.12\r\n");
+  } else {
+    const executable = join(bin, "opencode");
+    await writeFile(executable, "#!/bin/sh\necho 1.15.12\n");
+    await chmod(executable, 0o755);
+  }
   return { env, paths: resolvePaths(env) };
 }
 

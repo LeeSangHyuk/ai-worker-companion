@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, writeFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolvePaths } from "../cli/paths.js";
+import { getPackageVersion } from "../cli/paths.js";
 import { install, uninstall } from "../cli/install.js";
 
 async function fixture(tui = null) {
@@ -30,6 +31,10 @@ test("install preserves OMO config and is idempotent", async () => {
   assert.match(tuiEntry, /export default \{/);
   assert.match(tuiEntry, /id: "awc:tui"/);
   assert.match(tuiEntry, /tui,/);
+  const runtimePackage = JSON.parse(await readFile(paths.runtimePackage, "utf8"));
+  const manifest = JSON.parse(await readFile(paths.manifest, "utf8"));
+  assert.equal(runtimePackage.awcVersion, getPackageVersion());
+  assert.equal(manifest.awcVersion, getPackageVersion());
 });
 
 test("uninstall removes only AWC entries", async () => {

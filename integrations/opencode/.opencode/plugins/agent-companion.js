@@ -10,6 +10,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SIDEBAR_MIN_WIDTH = 100;
 const HEALTH_REFRESH_THROTTLE_MS = 1500;
@@ -18,8 +19,13 @@ const HEALTH_STALE_AFTER_MS = positiveInteger(process.env.AWC_HEALTH_STALE_AFTER
 const NOTIFICATION_COOLDOWN_MS = positiveInteger(process.env.AWC_NOTIFICATION_COOLDOWN_MS, 30000);
 const NOTIFICATION_MODES = new Set(["off", "problems-only", "all"]);
 const NOTIFICATION_LOCK_STALE_MS = positiveInteger(process.env.AWC_NOTIFICATION_LOCK_STALE_MS, 6 * 60 * 60 * 1000);
+const UPDATE_CHECK_INTERVAL_MS = positiveInteger(process.env.AWC_UPDATE_CHECK_INTERVAL_MS, 24 * 60 * 60 * 1000);
+const UPDATE_CHECK_TIMEOUT_MS = positiveInteger(process.env.AWC_UPDATE_CHECK_TIMEOUT_MS, 3000);
+const PACKAGE_NAME = "ai-worker-companion";
+const PACKAGE_VERSION = "0.2.7";
 const DEBUG_LAYOUT = process.env.COMPANION_DEBUG_LAYOUT === "1";
 const DEFAULT_OPENCODE_DB = join(homedir(), ".local/share/opencode/opencode.db");
+const pluginSourcePath = fileURLToPath(import.meta.url);
 const HEALTH_REFRESH_EVENTS = new Set([
   "command.executed",
   "message.part.delta",
@@ -159,6 +165,192 @@ function positiveInteger(value, fallback) {
 function enabledFlag(value, fallback = false) {
   if (value === undefined || value === null || value === "") return fallback;
   return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function updateCheckCachePath(env = process.env) {
+  const runtimeDir = env.AWC_RUNTIME_DIR ?? join(homedir(), ".local/share/awc");
+  return env.AWC_UPDATE_CHECK_CACHE_PATH ?? join(runtimeDir, "update-check.json");
+}
+
+function awcRuntimeDir(env = process.env) {
+  // TODO: Revisit macOS Application Support, Windows LOCALAPPDATA, and
+  // XDG_DATA_HOME when AWC adopts platform-specific runtime directories.
+  return env.AWC_RUNTIME_DIR ?? join(homedir(), ".local/share/awc");
+}
+
+function installedPackageVersion(env = process.env) {
+  const candidates = [
+    join(awcRuntimeDir(env), "package.json"),
+    join(awcRuntimeDir(env), "manifest.json"),
+    join(dirname(pluginSourcePath), "../../../..", "package.json"),
+  ];
+  for (const path of candidates) {
+    const value = readJsonSync(path, null);
+    if (value?.awcVersion) return value.awcVersion;
+    if (value?.name === PACKAGE_NAME && value?.version) return value.version;
+  }
+  return PACKAGE_VERSION;
+}
+
+function readJsonSync(path, fallback = null) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonSync(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function readUpdateCache(readCache, cachePath) {
+  try {
+    return readCache(cachePath, null);
+  } catch {
+    return null;
+  }
+}
+
+function writeUpdateCache(writeCache, cachePath, value) {
+  try {
+    writeCache(cachePath, value);
+  } catch {
+    // Cache failures are intentionally ignored.
+  }
+}
+
+function parseVersion(version) {
+  const withoutBuild = String(version ?? "").trim().replace(/^v/, "").split("+")[0];
+  const prereleaseIndex = withoutBuild.indexOf("-");
+  const coreText = prereleaseIndex === -1 ? withoutBuild : withoutBuild.slice(0, prereleaseIndex);
+  const prereleaseText = prereleaseIndex === -1 ? "" : withoutBuild.slice(prereleaseIndex + 1);
+  const coreParts = coreText.split(".");
+  if (coreParts.length < 2 || coreParts.length > 3) return null;
+
+  const core = coreParts.map((part) => {
+    if (!/^\d+$/.test(part)) return null;
+    return Number(part);
+  });
+  if (core.some((part) => part === null)) return null;
+  while (core.length < 3) core.push(0);
+
+  if (prereleaseIndex !== -1 && prereleaseText === "") return null;
+  const prerelease = prereleaseText === "" ? [] : prereleaseText.split(".");
+  if (prerelease.some((part) => part === "" || !/^[0-9A-Za-z-]+$/.test(part))) return null;
+  return { core, prerelease };
+}
+
+function comparePrerelease(left, right) {
+  if (left.length === 0 && right.length === 0) return 0;
+  if (left.length === 0) return 1;
+  if (right.length === 0) return -1;
+
+  const length = Math.max(left.length, right.length);
+  for (let index = 0; index < length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    if (a === b) continue;
+
+    const aIsNumeric = /^\d+$/.test(a);
+    const bIsNumeric = /^\d+$/.test(b);
+    if (aIsNumeric && bIsNumeric) {
+      const aNumber = Number(a);
+      const bNumber = Number(b);
+      if (aNumber > bNumber) return 1;
+      if (aNumber < bNumber) return -1;
+      continue;
+    }
+    if (aIsNumeric) return -1;
+    if (bIsNumeric) return 1;
+    return a > b ? 1 : -1;
+  }
+  return 0;
+}
+
+export function compareVersions(left, right) {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  if (!a || !b) return 0;
+  for (let index = 0; index < 3; index += 1) {
+    if (a.core[index] > b.core[index]) return 1;
+    if (a.core[index] < b.core[index]) return -1;
+  }
+  return comparePrerelease(a.prerelease, b.prerelease);
+}
+
+export async function checkForUpdate({
+  env = process.env,
+  currentVersion = installedPackageVersion(env),
+  packageName = PACKAGE_NAME,
+  registryUrl = "https://registry.npmjs.org",
+  cachePath = updateCheckCachePath(env),
+  intervalMs = UPDATE_CHECK_INTERVAL_MS,
+  timeoutMs = UPDATE_CHECK_TIMEOUT_MS,
+  now = () => Date.now(),
+  fetchFn = globalThis.fetch,
+  readCache = readJsonSync,
+  writeCache = writeJsonSync,
+} = {}) {
+  const cached = readUpdateCache(readCache, cachePath);
+  if (cached?.checkedAtMs && now() - Number(cached.checkedAtMs) < intervalMs) {
+    return cached.updateAvailable ? { ...cached, fromCache: true } : { updateAvailable: false, fromCache: true };
+  }
+
+  if (typeof fetchFn !== "function") return { updateAvailable: false, skipped: "fetch_unavailable" };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  timeout?.unref?.();
+  try {
+    const url = `${registryUrl.replace(/\/$/, "")}/${encodeURIComponent(packageName)}/latest`;
+    const response = await fetchFn(url, {
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    });
+    if (!response?.ok) {
+      return { updateAvailable: false, skipped: "registry_failure" };
+    }
+    const body = await response.json();
+    const latestVersion = typeof body?.version === "string" ? body.version : null;
+    if (!latestVersion || !parseVersion(latestVersion)) {
+      return { updateAvailable: false, skipped: "registry_failure" };
+    }
+    const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+    const result = {
+      updateAvailable,
+      currentVersion,
+      latestVersion,
+      checkedAtMs: now(),
+    };
+    writeUpdateCache(writeCache, cachePath, result);
+    return result;
+  } catch {
+    return { updateAvailable: false, skipped: "registry_failure" };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+export function updateAvailableMessage(result) {
+  return `Current : ${result.currentVersion}\nLatest  : ${result.latestVersion}\n\nRun:\nnpx ai-worker-companion@latest install\n\nThen restart OpenCode.`;
+}
+
+function maybeShowUpdateToast(api, options = {}) {
+  if (!api?.ui?.toast) return;
+  checkForUpdate(options).then((result) => {
+    if (!result?.updateAvailable) return;
+    api.ui.toast({
+      variant: "info",
+      title: "AWC Update Available",
+      message: updateAvailableMessage(result),
+      duration: 10000,
+    });
+  }).catch(() => {
+    // Update checks are best-effort and must never affect Health polling.
+  });
 }
 
 export function resolveNotificationMode({ mode, enabled } = {}) {
@@ -1046,6 +1238,7 @@ export const tui = async (api, _options, meta) => {
       duration: 4000,
     });
   }
+  maybeShowUpdateToast(api);
 
   const removeEventHandlers = registerHealthEventHandlers(
     api.event,

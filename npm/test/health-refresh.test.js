@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   acquirePluginNotificationLock,
+  checkForUpdate,
+  compareVersions,
   createHealthRefreshController,
   createNotificationStore,
   executeWatcher,
@@ -14,6 +16,7 @@ import {
   resolveNotificationMode,
   startPluginNotificationController,
   startSharedPluginNotificationController,
+  updateAvailableMessage,
 } from "../../integrations/opencode/.opencode/plugins/agent-companion.js";
 
 function healthState({ health = "idle", checkedAtMs, lastUpdate = "9:36 PM", sessionId = "ses_test", providerRetryActive = false } = {}) {
@@ -51,6 +54,231 @@ function scheduler() {
     },
   };
 }
+
+function updateCache(initial = null) {
+  let value = initial;
+  let writes = 0;
+  return {
+    readCache: () => value,
+    writeCache: (_path, nextValue) => {
+      writes += 1;
+      value = nextValue;
+    },
+    get value() {
+      return value;
+    },
+    get writes() {
+      return writes;
+    },
+  };
+}
+
+function registryResponse(version) {
+  return {
+    ok: true,
+    json: async () => ({ version }),
+  };
+}
+
+test("version comparison follows semver precedence", () => {
+  assert.equal(compareVersions("1.0.0-beta", "1.0.0"), -1);
+  assert.equal(compareVersions("1.0.0-rc.1", "1.0.0"), -1);
+  assert.equal(compareVersions("1.0.0", "1.0.0"), 0);
+  assert.equal(compareVersions("0.2.9", "0.2.10"), -1);
+  assert.equal(compareVersions("0.10.0", "0.9.9"), 1);
+  assert.equal(compareVersions("1.0", "1.0.0"), 0);
+  assert.equal(compareVersions("1.0.0-rc.2", "1.0.0-rc.1"), 1);
+});
+
+test("update checker reports no update when latest is current", async () => {
+  const cache = updateCache();
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000,
+    fetchFn: async () => registryResponse("0.2.6"),
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, false);
+  assert.equal(result.latestVersion, "0.2.6");
+  assert.equal(cache.writes, 1);
+});
+
+test("update checker reports update when latest is newer", async () => {
+  const cache = updateCache();
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000,
+    fetchFn: async () => registryResponse("0.2.7"),
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, true);
+  assert.equal(result.currentVersion, "0.2.6");
+  assert.equal(result.latestVersion, "0.2.7");
+});
+
+test("update checker ignores registry timeout", async () => {
+  const cache = updateCache();
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    timeoutMs: 1,
+    now: () => 1_000,
+    fetchFn: (_url, options) => new Promise((resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(new Error("aborted")));
+      setTimeout(() => resolve(registryResponse("0.2.7")), 50);
+    }),
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, false);
+  assert.equal(result.skipped, "registry_failure");
+  assert.equal(cache.writes, 0);
+});
+
+test("update checker ignores registry failure", async () => {
+  const cache = updateCache();
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000,
+    fetchFn: async () => ({ ok: false, json: async () => ({}) }),
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, false);
+  assert.equal(result.skipped, "registry_failure");
+  assert.equal(cache.writes, 0);
+});
+
+test("update checker ignores offline errors", async () => {
+  const cache = updateCache();
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000,
+    fetchFn: async () => { throw new Error("offline"); },
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, false);
+  assert.equal(result.skipped, "registry_failure");
+  assert.equal(cache.writes, 0);
+});
+
+test("update checker retries after offline failure because failure is not cached", async () => {
+  let fetches = 0;
+  const cache = updateCache();
+  const first = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000,
+    fetchFn: async () => {
+      fetches += 1;
+      throw new Error("offline");
+    },
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  const second = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 2_000,
+    fetchFn: async () => {
+      fetches += 1;
+      return registryResponse("0.2.7");
+    },
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(first.updateAvailable, false);
+  assert.equal(first.skipped, "registry_failure");
+  assert.equal(second.updateAvailable, true);
+  assert.equal(second.latestVersion, "0.2.7");
+  assert.equal(fetches, 2);
+  assert.equal(cache.writes, 1);
+});
+
+test("update available message tells users to restart OpenCode", () => {
+  const message = updateAvailableMessage({
+    currentVersion: "0.2.6",
+    latestVersion: "0.2.7",
+  });
+
+  assert.match(message, /Current : 0\.2\.6/);
+  assert.match(message, /Latest  : 0\.2\.7/);
+  assert.match(message, /npx ai-worker-companion@latest install/);
+  assert.match(message, /Then restart OpenCode\./);
+});
+
+test("update checker ignores cache write failures", async () => {
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000,
+    fetchFn: async () => registryResponse("0.2.7"),
+    readCache: () => null,
+    writeCache: () => { throw new Error("cache denied"); },
+  });
+
+  assert.equal(result.updateAvailable, true);
+  assert.equal(result.latestVersion, "0.2.7");
+});
+
+test("update checker uses cache hit", async () => {
+  let fetches = 0;
+  const cache = updateCache({
+    updateAvailable: true,
+    currentVersion: "0.2.6",
+    latestVersion: "0.2.7",
+    checkedAtMs: 1_000,
+  });
+
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 2_000,
+    intervalMs: 24 * 60 * 60 * 1000,
+    fetchFn: async () => {
+      fetches += 1;
+      return registryResponse("0.2.8");
+    },
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, true);
+  assert.equal(result.latestVersion, "0.2.7");
+  assert.equal(result.fromCache, true);
+  assert.equal(fetches, 0);
+});
+
+test("update checker does not requery within 24 hours after no update", async () => {
+  let fetches = 0;
+  const cache = updateCache({
+    updateAvailable: false,
+    currentVersion: "0.2.6",
+    latestVersion: "0.2.6",
+    checkedAtMs: 1_000,
+  });
+
+  const result = await checkForUpdate({
+    currentVersion: "0.2.6",
+    now: () => 1_000 + 60 * 60 * 1000,
+    intervalMs: 24 * 60 * 60 * 1000,
+    fetchFn: async () => {
+      fetches += 1;
+      return registryResponse("0.2.7");
+    },
+    readCache: cache.readCache,
+    writeCache: cache.writeCache,
+  });
+
+  assert.equal(result.updateAvailable, false);
+  assert.equal(result.fromCache, true);
+  assert.equal(fetches, 0);
+});
 
 test("polling continues across multiple cycles", async () => {
   let now = 1_000;

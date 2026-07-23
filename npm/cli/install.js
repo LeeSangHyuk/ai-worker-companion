@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseJsonFile, readOptional, restore, writeAtomic, writeJson } from "./files.js";
 import { runCommand } from "./paths.js";
+import { getPackageVersion } from "./paths.js";
 
 const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const TUI_ENTRY = "./tui-plugins/awc.js";
@@ -32,6 +33,7 @@ function maybeFail(env, stage) {
 export async function install(paths, { env = process.env, skipDependencies = false } = {}) {
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor < 24) throw new Error(`Node.js 24 or newer is required (current: ${process.version})`);
+  const awcVersion = getPackageVersion();
   const mutable = [paths.tuiConfig, paths.tuiEntry, paths.pluginEntry, paths.manifest, paths.watcher, paths.retryParser, paths.plugin, paths.runtimePackage];
   const before = await snapshot(mutable);
   try {
@@ -52,6 +54,7 @@ export async function install(paths, { env = process.env, skipDependencies = fal
     const runtimePackage = {
       private: true,
       type: "module",
+      awcVersion,
       dependencies: { "@opentui/solid": "^0.2.16" },
     };
     await writeJson(paths.runtimePackage, runtimePackage);
@@ -67,6 +70,7 @@ export async function install(paths, { env = process.env, skipDependencies = fal
 
     await writeJson(paths.manifest, {
       version: 1,
+      awcVersion,
       installedAt: new Date().toISOString(),
       runtimeDir: paths.runtimeDir,
       tuiEntry: TUI_ENTRY,

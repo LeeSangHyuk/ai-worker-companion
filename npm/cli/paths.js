@@ -16,13 +16,40 @@ export function formatVersion(version = getPackageVersion()) {
   return `AI Worker Companion ${version}`;
 }
 
-function pathValue(env) {
-  return env.PATH || env.Path || env.path || "";
+function pathDelimiter(platform) {
+  return platform === "win32" ? ";" : delimiter;
+}
+
+function envValue(env, name, platform) {
+  if (env[name]) return env[name];
+  if (platform !== "win32") return "";
+  const match = Object.keys(env).find((key) => key.toLowerCase() === name.toLowerCase() && env[key]);
+  return match ? env[match] : "";
+}
+
+function pathValues(env, platform) {
+  if (platform !== "win32") return [env.PATH || ""].filter(Boolean);
+
+  const values = [];
+  const seenKeys = new Set();
+  for (const name of ["Path", "PATH", "path"]) {
+    if (env[name]) {
+      values.push(env[name]);
+      seenKeys.add(name);
+    }
+  }
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === "path" && env[key] && !seenKeys.has(key)) {
+      values.push(env[key]);
+      seenKeys.add(key);
+    }
+  }
+  return values;
 }
 
 function pathExtensions(env, platform) {
   if (platform !== "win32") return [""];
-  return (env.PATHEXT || ".COM;.EXE;.BAT;.CMD")
+  return (envValue(env, "PATHEXT", platform) || ".COM;.EXE;.BAT;.CMD")
     .split(";")
     .filter(Boolean)
     .flatMap((extension) => [extension, extension.toLowerCase()]);
@@ -42,21 +69,35 @@ function hasPathSeparator(command) {
 
 function findExecutable(command, { env = process.env, platform = process.platform } = {}) {
   const extensions = pathExtensions(env, platform);
-  const candidates = [];
-  if (hasPathSeparator(command)) candidates.push(command);
-  else {
-    for (const directory of pathValue(env).split(delimiter).filter(Boolean)) {
-      candidates.push(join(directory, command));
+  if (hasPathSeparator(command)) {
+    if (platform === "win32" && !extname(command)) {
+      for (const extension of extensions) {
+        const expanded = `${command}${extension}`;
+        if (isFile(expanded)) return expanded;
+      }
+    }
+    return isFile(command) ? command : null;
+  }
+
+  const baseCandidates = [];
+  for (const value of pathValues(env, platform)) {
+    for (const directory of value.split(pathDelimiter(platform)).filter(Boolean)) {
+      baseCandidates.push(join(directory, command));
     }
   }
-  for (const candidate of candidates) {
-    if (isFile(candidate)) return candidate;
-    if (platform === "win32" && !extname(candidate)) {
+
+  if (platform === "win32" && !extname(command)) {
+    for (const candidate of baseCandidates) {
       for (const extension of extensions) {
         const expanded = `${candidate}${extension}`;
         if (isFile(expanded)) return expanded;
       }
     }
+    return null;
+  }
+
+  for (const candidate of baseCandidates) {
+    if (isFile(candidate)) return candidate;
   }
   return null;
 }
@@ -72,9 +113,10 @@ function quoteForCmd(value) {
 function windowsCommandShim(path, args, env) {
   return {
     command: env.ComSpec || "cmd.exe",
-    args: ["/d", "/s", "/c", [path, ...args].map(quoteForCmd).join(" ")],
+    args: ["/d", "/s", "/c", `call ${[path, ...args].map(quoteForCmd).join(" ")}`],
     resolved: path,
     via: "cmd-shim",
+    windowsVerbatimArguments: true,
   };
 }
 
@@ -113,6 +155,7 @@ export function runCommand(command, args = [], { env = process.env, platform = p
     env,
     encoding: "utf8",
     shell: false,
+    windowsVerbatimArguments: resolved.windowsVerbatimArguments,
     ...spawnOptions,
   });
   result.awcCommand = resolved;
