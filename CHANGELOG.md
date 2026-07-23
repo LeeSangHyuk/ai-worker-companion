@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.2.7
+
+### Added
+
+- Add an in-plugin update checker for `ai-worker-companion` that compares the
+  installed version with the npm `latest` version.
+- Show a best-effort OpenCode toast when a newer AWC version is available,
+  including the install command and restart guidance.
+- Add update-check caching so the registry is not queried on every plugin load.
+- Add CLI version output through `awc version`, `awc --version`, and `awc -v`.
+
+### Changed
+
+- Bump the npm package and installed runtime metadata to `0.2.7`.
+- Improve Windows command resolution by using Windows path delimiters, honoring
+  `Path`/`PATH` casing differences, and preferring `PATHEXT` executable shims.
+- Keep update checks isolated from Health polling so registry/network failures
+  do not affect Health display or notifications.
+- Continue using the shared executable resolver for `npm`, `npm.cmd`, and
+  `opencode` across install and doctor flows.
+
+### Fixed
+
+- Fix Windows cases where `doctor` could report `OpenCode (not found)` even
+  when `opencode --version` worked in the user's shell.
+- Fix Windows `.cmd` shim execution for paths with spaces without enabling
+  `shell: true` globally.
+- Fix stale `PATH` vs `Path` handling on Windows by checking all relevant
+  environment key variants.
+- Fix command lookup order so Windows `PATHEXT` candidates are preferred over
+  extensionless shadow files.
+
+### Validation
+
+- Added tests for Windows `Path`/`PATH` casing, stale `PATH`, `PATHEXT` lookup,
+  `.cmd` shim execution, paths containing spaces, native fallback behavior, and
+  update checker cache/failure behavior.
+- Revalidated npm tests and package dry-run before release.
+
+### Known limitations
+
+- Windows native notifications are not included in this release.
+- Desktop UI surfaces are still not available; OpenCode Desktop support remains
+  background/notification focused.
+- Multi-session aggregate monitoring across multiple concurrent OpenCode
+  windows is not yet supported.
+- Update checks are best-effort and depend on npm registry reachability.
+
 ## 0.2.6
 
 ### Added

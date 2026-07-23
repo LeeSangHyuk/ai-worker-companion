@@ -29,9 +29,10 @@ OpenCode DB + OpenCode logs
   -> TUI sidebar / compact indicator, or Desktop background notification loop
 ```
 
-## What works in 0.2.6
+## What works in 0.2.7
 
 - Local npm CLI: `awc install`, `awc doctor`, `awc uninstall`.
+- Version command: `awc version`, `awc --version`, and `awc -v`.
 - OpenCode TUI Health surface with `Overall`, `Parent`, `Children`, `Reason`,
   `Tool`, and `Last Check`.
 - OpenCode Desktop background monitoring through the standard plugin lifecycle.
@@ -57,6 +58,10 @@ OpenCode DB + OpenCode logs
   - direct child sessions are evaluated individually
   - old child sessions are excluded so stale failures do not pollute current work
   - compact indicator shows Overall only
+- Update checker:
+  - compares the installed AWC version with npm `latest`
+  - shows a best-effort OpenCode toast when an update is available
+  - caches checks to avoid repeated registry requests
 
 ## Install
 
@@ -90,7 +95,7 @@ npx ai-worker-companion@latest uninstall
 ```text
 AI Worker Companion Doctor
 
-AWC      : 0.2.6
+AWC      : 0.2.7
 Node     : v24.x.x
 Platform : darwin-arm64
 OpenCode : 1.x.x
@@ -99,8 +104,10 @@ Plugin   : ~/.local/share/awc/opencode/agent-companion.js
 ```
 
 On Windows, AWC resolves npm/OpenCode executables through a shared command
-resolver. It prefers `npm_execpath` when npm provides it and handles `.cmd`
-wrappers without enabling `shell: true` globally.
+resolver. It prefers `npm_execpath` when npm provides it, honors Windows
+`Path`/`PATH` casing differences, uses Windows path delimiters, prefers
+`PATHEXT` executable candidates, and handles `.cmd` wrappers without enabling
+`shell: true` globally.
 
 ## What you should see
 
@@ -150,6 +157,20 @@ Modes:
 
 Legacy opt-in is preserved: if `AWC_NOTIFICATION_MODE` is not set and
 `AWC_NOTIFICATION_ENABLED=1`, AWC treats it as `all`.
+
+## Update checks
+
+When OpenCode loads the plugin, AWC can perform a best-effort npm registry check
+for a newer `ai-worker-companion` version. If an update is available and
+OpenCode exposes a toast API, AWC shows a short update message with:
+
+```text
+npx ai-worker-companion@latest install
+```
+
+Update checks are cached for about 24 hours by default and never change Health
+state. Registry timeouts, offline mode, or cache write failures are ignored so
+AWC Health polling continues normally.
 
 ## OpenCode Desktop support
 
@@ -213,6 +234,7 @@ primary signal. Health is based on structured local evidence.
   currently expose a plugin UI API.
 - Native notifications are macOS-focused and opt-in; Windows/Linux native
   notifications, mobile push, and notification history are not included.
+- Update checks are best-effort and require npm registry access.
 - Natural-language assistant text analysis is not included.
 - A direct TUI shell command may remain `Unknown` if OpenCode records no exit
   code.

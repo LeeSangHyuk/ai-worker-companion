@@ -1,6 +1,6 @@
 # Health Model
 
-This document defines the Health model used by `ai-worker-companion@0.2.6`.
+This document defines the Health model used by `ai-worker-companion@0.2.7`.
 
 AWC Health is evidence-based. It should explain what local OpenCode evidence was
 observed and avoid pretending to know hidden model intent.
@@ -135,7 +135,7 @@ retry older than TTL                   → ignored
 newer same-session DB activity exists  → retry cleared
 ```
 
-Provider retry does not become `failed` in 0.2.6. The user may still be able to
+Provider retry does not become `failed` in 0.2.7. The user may still be able to
 wait, change provider/model, or retry later.
 
 ## Parent/Child model

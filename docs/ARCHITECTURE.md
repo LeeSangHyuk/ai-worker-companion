@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the AI Worker Companion architecture as of
-`ai-worker-companion@0.2.6`.
+`ai-worker-companion@0.2.7`.
 
 The short version:
 
@@ -23,6 +23,7 @@ It answers:
 - What evidence caused that label?
 - Is the parent task idle while a child agent is still working?
 - Is a provider/model retry loop preventing progress?
+- Is the installed AWC package behind npm `latest`?
 
 It is not:
 
@@ -81,6 +82,8 @@ Responsibilities:
 The CLI copies runtime files from the npm package into user-level XDG paths.
 It also centralizes external executable resolution in `npm/cli/paths.js` so
 `npm`, `npm.cmd`, and `opencode` are handled consistently across platforms.
+On Windows, the resolver accounts for `Path`/`PATH` casing differences, Windows
+path delimiters, `PATHEXT`, `.cmd` shims, and paths containing spaces.
 
 Common edit points:
 
@@ -121,6 +124,8 @@ Standard plugin responsibilities:
 - avoid duplicate notification pollers across multiple OpenCode plugin contexts
   with an AWC-managed file lock
 - log non-sensitive notification decisions with `client.app.log`
+- check npm `latest` on a cached, best-effort basis and show an update toast
+  when OpenCode exposes `api.ui.toast`
 
 The plugin does not own Health policy. It renders watcher output in TUI mode and
 uses the same output to drive opt-in notifications in Desktop/no-TUI mode.
@@ -155,6 +160,7 @@ Common edit points:
 | Change sidebar or compact display | `integrations/opencode/.opencode/plugins/agent-companion.js` |
 | Change polling/stale UI behavior | `npm/test/health-refresh.test.js` |
 | Change notification mode or Desktop-safe polling | `integrations/opencode/.opencode/plugins/agent-companion.js`, `npm/test/health-refresh.test.js` |
+| Change update checker behavior | `integrations/opencode/.opencode/plugins/agent-companion.js`, `npm/test/health-refresh.test.js` |
 | Update user-facing display examples | `README.md`, `CHANGELOG.md` |
 
 ### DB Health Watcher
@@ -345,7 +351,10 @@ AWC does not currently implement:
 - recursive/nested child UI
 - OMO-specific aggregation
 - natural-language assistant text analysis
-- notifications
+- Windows/Linux native notifications
+- notification history or mobile push
+- multi-session aggregate monitoring across multiple concurrent OpenCode
+  windows
 - automatic recovery
 - new Health enum values beyond `idle`, `active`, `quiet`, `stuck`, `failed`,
   and `unknown`
